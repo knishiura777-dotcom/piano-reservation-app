@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>ピアノプラクティスルーム予約</title>
+  <title>ピアノプラクティスルーム予約システム</title>
 
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
@@ -12,7 +12,7 @@
   <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore-compat.js"></script>
 </head>
-<body class="bg-slate-50">
+<body class="bg-slate-100">
   <div id="root" class="p-6 text-slate-700">読み込み中...</div>
 
   <script type="text/babel">
@@ -29,7 +29,6 @@
     };
 
     const COLLECTION_PATH = "artifacts/piano-practice-room-v1/public/data/reservations";
-
     const ROOMS = [
       "B105","B106","B107","B108","B109","B110","B111","B112","B113","B114","B115","B116","B117","B118","B119",
       "B209","B210","B211","B212","B213","B214","B215","B216"
@@ -55,16 +54,19 @@
     const lastReservableDate = () => fmtDate(addDays(todayDate(), 13));
     const fmtTime = (m) => `${pad(Math.floor(m / 60))}:${pad(m % 60)}`;
     const dayLabel = (dateStr) => ["日","月","火","水","木","金","土"][parseDate(dateStr).getDay()];
-    const isSameDateStr = (a, b) => a === b;
     const inReservableRange = (dateStr) => {
       const value = parseDate(dateStr).getTime();
       return value >= todayDate().getTime() && value <= addDays(todayDate(), 13).getTime();
     };
+    const makeReservationCode = () => {
+      const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+      let out = "PR-";
+      for (let i = 0; i < 8; i++) out += chars[Math.floor(Math.random() * chars.length)];
+      return out;
+    };
 
     const timeSlots = [];
-    for (let h = 9; h < 21; h++) {
-      timeSlots.push(h * 60, h * 60 + 30);
-    }
+    for (let h = 9; h < 21; h++) timeSlots.push(h * 60, h * 60 + 30);
 
     let db = null;
     try {
@@ -84,6 +86,9 @@
       const [room, setRoom] = useState("");
       const [msg, setMsg] = useState("");
       const [adminDate, setAdminDate] = useState(today());
+      const [cancelCode, setCancelCode] = useState("");
+      const [cancelMsg, setCancelMsg] = useState("");
+      const [latestCode, setLatestCode] = useState("");
 
       const [form, setForm] = useState({
         id: "",
@@ -99,7 +104,6 @@
 
       useEffect(() => {
         if (!db) return;
-
         const unsubscribe = db.collection(COLLECTION_PATH).onSnapshot(
           (snapshot) => {
             const arr = [];
@@ -111,13 +115,11 @@
             setMsg("Firestore の読み込みに失敗しました。ルールを確認してください。");
           }
         );
-
         return () => unsubscribe();
       }, []);
 
       function isFreeAt(targetDate, targetRoom, targetStart, targetDuration = 30) {
         const targetEnd = targetStart + targetDuration;
-
         return !data.some((d) => {
           if (d.date !== targetDate || d.room !== targetRoom) return false;
           const dEnd = d.startMinutes + d.durationMinutes;
@@ -125,13 +127,30 @@
         });
       }
 
-      const freeRooms = useMemo(() => {
-        return ROOMS.filter((r) => isFreeAt(date, r, start, duration));
-      }, [data, date, start, duration]);
+      const freeRooms = useMemo(() => ROOMS.filter((r) => isFreeAt(date, r, start, duration)), [data, date, start, duration]);
+
+      const adminStats = useMemo(() => {
+        const dayRows = data.filter((x) => x.date === adminDate);
+        const uniqueUsers = new Set(dayRows.map((x) => `${x.studentId}_${x.name}`)).size;
+        const usedSlots = dayRows.reduce((sum, x) => sum + (x.durationMinutes / 30), 0);
+        const totalSlots = ROOMS.length * timeSlots.length;
+        const availableSlots = Math.max(0, totalSlots - usedSlots);
+        const unavailableSlots = 0;
+        return {
+          count: dayRows.length,
+          uniqueUsers,
+          utilization: totalSlots ? Math.round((usedSlots / totalSlots) * 1000) / 10 : 0,
+          totalSlots,
+          availableSlots,
+          usedSlots,
+          unavailableSlots
+        };
+      }, [data, adminDate]);
 
       async function reserve(e) {
         e.preventDefault();
         setMsg("");
+        setLatestCode("");
 
         if (!inReservableRange(date)) {
           setMsg("予約できるのは当日から2週間先までです。");
@@ -147,15 +166,13 @@
         }
 
         const docId = `${date}_${room}_${start}`;
+        const reservationCode = makeReservationCode();
 
         try {
           await db.runTransaction(async (tx) => {
             const ref = db.collection(COLLECTION_PATH).doc(docId);
             const doc = await tx.get(ref);
-
-            if (doc.exists) {
-              throw new Error("既に予約があります");
-            }
+            if (doc.exists) throw new Error("既に予約があります");
 
             data.forEach((d) => {
               if (d.date === date && d.room === room) {
@@ -176,11 +193,13 @@
               studentId: form.id,
               contact: form.contact,
               email: form.email,
+              reservationCode,
               createdAt: firebase.firestore.FieldValue.serverTimestamp()
             });
           });
 
-          setMsg("予約完了");
+          setLatestCode(reservationCode);
+          setMsg("予約が完了しました。キャンセル用コードを控えてください。");
           setForm({ id: "", name: "", contact: "", email: "" });
           setRoom("");
         } catch (e) {
@@ -189,222 +208,253 @@
         }
       }
 
+      async function cancelReservation(e) {
+        e.preventDefault();
+        setCancelMsg("");
+        const code = cancelCode.trim().toUpperCase();
+        if (!code) {
+          setCancelMsg("予約コードを入力してください。");
+          return;
+        }
+        try {
+          const snapshot = await db.collection(COLLECTION_PATH).where("reservationCode", "==", code).get();
+          if (snapshot.empty) {
+            setCancelMsg("該当する予約コードが見つかりません。");
+            return;
+          }
+          const doc = snapshot.docs[0];
+          await db.collection(COLLECTION_PATH).doc(doc.id).delete();
+          setCancelMsg("予約をキャンセルしました。");
+          setCancelCode("");
+        } catch (e) {
+          console.error("キャンセルエラー:", e);
+          setCancelMsg("キャンセルに失敗しました。");
+        }
+      }
+
       return (
-        <div className="p-6 max-w-7xl mx-auto">
-          <div className="mb-6 flex gap-2">
-            <button
-              onClick={() => setView("student")}
-              className={`px-4 py-2 rounded font-bold ${view === "student" ? "bg-green-600 text-white" : "bg-white border text-slate-700"}`}
-            >
-              学生
-            </button>
-            <button
-              onClick={() => setView("admin")}
-              className={`px-4 py-2 rounded font-bold ${view === "admin" ? "bg-indigo-600 text-white" : "bg-white border text-slate-700"}`}
-            >
-              管理
-            </button>
-          </div>
+        <div className="min-h-screen bg-slate-100">
+          <header className="bg-gradient-to-r from-emerald-600 to-teal-600 text-white shadow-lg">
+            <div className="max-w-7xl mx-auto px-6 py-8">
+              <h1 className="text-3xl md:text-4xl font-black tracking-tight">ピアノプラクティスルーム予約システム</h1>
+              <p className="mt-3 max-w-3xl text-emerald-50 leading-7">
+                学生が空き状況を確認しながら練習室を予約できるアプリです。予約は当日から2週間先まで対応し、発行された予約コードを使ってあとからキャンセルできます。管理画面では、選択日の利用状況を一覧で把握できます。
+              </p>
+              <div className="mt-5 flex gap-2">
+                <button onClick={() => setView("student")} className={`px-4 py-2 rounded-xl font-bold transition ${view === "student" ? "bg-white text-emerald-700" : "bg-white/20 text-white"}`}>学生画面</button>
+                <button onClick={() => setView("admin")} className={`px-4 py-2 rounded-xl font-bold transition ${view === "admin" ? "bg-white text-teal-700" : "bg-white/20 text-white"}`}>管理画面</button>
+              </div>
+            </div>
+          </header>
 
-          {view === "student" && (
-            <div className="space-y-6">
-              <div className="bg-white rounded-xl border p-4 shadow-sm">
-                <div className="flex items-center justify-between mb-3">
-                  <div>
-                    <h2 className="text-lg font-bold">予約カレンダー</h2>
-                    <p className="text-sm text-slate-500">当日から2週間先まで選択できます。</p>
+          <main className="max-w-7xl mx-auto px-6 py-8">
+            {view === "student" && (
+              <div className="space-y-6">
+                <section className="bg-white rounded-3xl border border-slate-200 p-6 shadow-sm">
+                  <h2 className="text-xl font-black text-slate-800">予約カレンダー</h2>
+                  <p className="text-sm text-slate-500 mt-1">当日から2週間先までの日付を選択できます。日付を選ぶと、その日の予約フォームに反映されます。</p>
+                  <div className="mt-5 grid grid-cols-2 sm:grid-cols-4 md:grid-cols-7 gap-3">
+                    {calendarDates.map((d) => {
+                      const selected = d === date;
+                      return (
+                        <button key={d} onClick={() => setDate(d)} className={`rounded-2xl border p-4 text-left transition shadow-sm ${selected ? "bg-emerald-600 text-white border-emerald-600" : "bg-slate-50 hover:bg-emerald-50 border-slate-200 text-slate-700"}`}>
+                          <div className="text-xs opacity-80">{d}</div>
+                          <div className="mt-1 text-lg font-black">{dayLabel(d)}</div>
+                        </button>
+                      );
+                    })}
                   </div>
-                  <div className="text-sm text-slate-500">
-                    予約可能期間: {today()} ～ {lastReservableDate()}
-                  </div>
-                </div>
+                </section>
 
-                <div className="grid grid-cols-2 sm:grid-cols-4 md:grid-cols-7 gap-2">
-                  {calendarDates.map((d) => {
-                    const freeCount = ROOMS.filter((r) => isFreeAt(d, r, start, 30)).length;
-                    const selected = isSameDateStr(d, date);
-                    return (
-                      <button
-                        key={d}
-                        onClick={() => setDate(d)}
-                        className={`rounded-xl border p-3 text-left transition ${selected ? "bg-green-600 text-white border-green-600" : "bg-white hover:bg-green-50"}`}
-                      >
-                        <div className="text-xs opacity-80">{d}</div>
-                        <div className="text-lg font-bold">{dayLabel(d)}</div>
-                        <div className="text-xs mt-1">{freeCount}室以上空き</div>
-                      </button>
-                    );
-                  })}
+                <div className="grid xl:grid-cols-[1.1fr,0.9fr] gap-6">
+                  <section className="bg-white rounded-3xl border border-slate-200 p-6 shadow-sm">
+                    <h2 className="text-xl font-black text-slate-800 mb-4">選択日の空き状況</h2>
+                    <div className="overflow-auto rounded-2xl border border-slate-200">
+                      <table className="w-full text-sm">
+                        <thead className="bg-slate-50 text-slate-600">
+                          <tr>
+                            <th className="px-4 py-3 text-left">時間</th>
+                            <th className="px-4 py-3 text-left">空き室数</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {timeSlots.map((t) => (
+                            <tr key={t} className={`border-t border-slate-200 ${t === start ? "bg-emerald-50" : "bg-white"}`}>
+                              <td className="px-4 py-3 font-medium">{fmtTime(t)}</td>
+                              <td className="px-4 py-3">{ROOMS.filter((r) => isFreeAt(date, r, t, 30)).length}室空き</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </section>
+
+                  <div className="space-y-6">
+                    <section className="bg-white rounded-3xl border border-slate-200 p-6 shadow-sm">
+                      <h2 className="text-xl font-black text-slate-800 mb-4">予約する</h2>
+                      <form onSubmit={reserve} className="space-y-3">
+                        <input type="date" min={today()} max={lastReservableDate()} value={date} onChange={(e) => setDate(e.target.value)} className="w-full rounded-xl border border-slate-300 px-4 py-3" />
+                        <select value={start} onChange={(e) => setStart(Number(e.target.value))} className="w-full rounded-xl border border-slate-300 px-4 py-3 bg-white">
+                          {timeSlots.map((t) => <option key={t} value={t}>{fmtTime(t)}</option>)}
+                        </select>
+                        <select value={duration} onChange={(e) => setDuration(Number(e.target.value))} className="w-full rounded-xl border border-slate-300 px-4 py-3 bg-white">
+                          <option value={30}>30分</option>
+                          <option value={60}>60分</option>
+                          <option value={90}>90分</option>
+                        </select>
+                        <select value={room} onChange={(e) => setRoom(e.target.value)} className="w-full rounded-xl border border-slate-300 px-4 py-3 bg-white">
+                          <option value="">空き部屋を選択</option>
+                          {freeRooms.map((r) => <option key={r} value={r}>{r}</option>)}
+                        </select>
+                        <input placeholder="学籍番号" value={form.id} onChange={(e) => setForm({ ...form, id: e.target.value })} className="w-full rounded-xl border border-slate-300 px-4 py-3" />
+                        <input placeholder="氏名" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} className="w-full rounded-xl border border-slate-300 px-4 py-3" />
+                        <input placeholder="連絡先" value={form.contact} onChange={(e) => setForm({ ...form, contact: e.target.value })} className="w-full rounded-xl border border-slate-300 px-4 py-3" />
+                        <input placeholder="メール" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} className="w-full rounded-xl border border-slate-300 px-4 py-3" />
+                        <button className="w-full rounded-xl bg-emerald-600 text-white py-3 font-black hover:bg-emerald-700 transition">予約する</button>
+                        {msg && <div className="rounded-xl bg-emerald-50 text-emerald-800 px-4 py-3 text-sm font-medium">{msg}</div>}
+                        {latestCode && (
+                          <div className="rounded-2xl bg-amber-50 border border-amber-200 px-4 py-4">
+                            <div className="text-sm text-amber-800">キャンセル時に必要な予約コード</div>
+                            <div className="mt-2 text-2xl font-black tracking-widest text-amber-900">{latestCode}</div>
+                          </div>
+                        )}
+                      </form>
+                    </section>
+
+                    <section className="bg-white rounded-3xl border border-slate-200 p-6 shadow-sm">
+                      <h2 className="text-xl font-black text-slate-800 mb-4">予約をキャンセルする</h2>
+                      <p className="text-sm text-slate-500 mb-3">予約時に発行された予約コードを入力すると、該当予約を削除できます。</p>
+                      <form onSubmit={cancelReservation} className="space-y-3">
+                        <input placeholder="例: PR-AB12CD34" value={cancelCode} onChange={(e) => setCancelCode(e.target.value.toUpperCase())} className="w-full rounded-xl border border-slate-300 px-4 py-3" />
+                        <button className="w-full rounded-xl bg-rose-600 text-white py-3 font-black hover:bg-rose-700 transition">予約コードでキャンセル</button>
+                        {cancelMsg && <div className="rounded-xl bg-rose-50 text-rose-700 px-4 py-3 text-sm font-medium">{cancelMsg}</div>}
+                      </form>
+                    </section>
+                  </div>
                 </div>
               </div>
+            )}
 
-              <div className="grid lg:grid-cols-2 gap-6">
-                <div>
-                  <h2 className="font-bold mb-2">選択日の空き状況</h2>
-                  <div className="overflow-auto bg-white border rounded-xl shadow-sm">
-                    <table className="border-collapse w-full">
-                      <thead>
-                        <tr className="bg-slate-100">
-                          <th className="border px-3 py-2 text-left">時間</th>
-                          <th className="border px-3 py-2 text-left">空き室数</th>
+            {view === "admin" && (
+              <div className="space-y-6">
+                <section className="grid md:grid-cols-2 xl:grid-cols-5 gap-4">
+                  <div className="bg-white rounded-3xl border border-slate-200 p-5 shadow-sm md:col-span-2 xl:col-span-1">
+                    <div className="text-sm text-slate-500">表示日</div>
+                    <input type="date" min={today()} max={lastReservableDate()} value={adminDate} onChange={(e) => setAdminDate(e.target.value)} className="mt-3 w-full rounded-xl border border-slate-300 px-4 py-3" />
+                  </div>
+                  <div className="bg-white rounded-3xl border border-emerald-200 p-5 shadow-sm bg-emerald-50">
+                    <div className="text-sm text-emerald-700">予約可</div>
+                    <div className="mt-2 text-3xl font-black text-emerald-800">{adminStats.availableSlots}</div>
+                    <div className="mt-1 text-xs text-emerald-700">30分枠ベース</div>
+                  </div>
+                  <div className="bg-white rounded-3xl border border-teal-200 p-5 shadow-sm bg-teal-50">
+                    <div className="text-sm text-teal-700">使用中</div>
+                    <div className="mt-2 text-3xl font-black text-teal-800">{adminStats.usedSlots}</div>
+                    <div className="mt-1 text-xs text-teal-700">30分枠ベース</div>
+                  </div>
+                  <div className="bg-white rounded-3xl border border-slate-200 p-5 shadow-sm bg-slate-50">
+                    <div className="text-sm text-slate-600">使用不可</div>
+                    <div className="mt-2 text-3xl font-black text-slate-700">{adminStats.unavailableSlots}</div>
+                    <div className="mt-1 text-xs text-slate-500">現在は固定ブロックなし</div>
+                  </div>
+                  <div className="bg-white rounded-3xl border border-indigo-200 p-5 shadow-sm bg-indigo-50">
+                    <div className="text-sm text-indigo-700">利用率</div>
+                    <div className="mt-2 text-3xl font-black text-indigo-800">{adminStats.utilization}%</div>
+                    <div className="mt-1 text-xs text-indigo-700">予約済 / 全枠</div>
+                  </div>
+                </section>
+
+                <section className="grid md:grid-cols-3 gap-4">
+                  <div className="bg-white rounded-3xl border border-slate-200 p-5 shadow-sm">
+                    <div className="text-sm text-slate-500">予約件数</div>
+                    <div className="mt-2 text-3xl font-black text-slate-800">{adminStats.count}</div>
+                  </div>
+                  <div className="bg-white rounded-3xl border border-slate-200 p-5 shadow-sm">
+                    <div className="text-sm text-slate-500">利用者数</div>
+                    <div className="mt-2 text-3xl font-black text-slate-800">{adminStats.uniqueUsers}</div>
+                  </div>
+                  <div className="bg-white rounded-3xl border border-slate-200 p-5 shadow-sm">
+                    <div className="text-sm text-slate-500">総枠数</div>
+                    <div className="mt-2 text-3xl font-black text-slate-800">{adminStats.totalSlots}</div>
+                    <div className="mt-1 text-xs text-slate-500">23室 × 24枠</div>
+                  </div>
+                </section>
+
+                <section className="bg-white rounded-3xl border border-slate-200 p-6 shadow-sm">
+                  <div className="mb-5">
+                    <h2 className="text-xl font-black text-slate-800">1日の状況ダッシュボード</h2>
+                    <p className="text-sm text-slate-500">選択日の30分枠を集計し、予約可・使用中・使用不可の状況を一覧で確認できます。</p>
+                  </div>
+                  <div className="grid md:grid-cols-3 gap-4">
+                    <div className="rounded-3xl bg-emerald-50 border border-emerald-200 p-5">
+                      <div className="flex items-center justify-between">
+                        <span className="text-sm font-bold text-emerald-700">予約可</span>
+                        <span className="inline-flex h-3 w-3 rounded-full bg-emerald-500"></span>
+                      </div>
+                      <div className="mt-3 text-4xl font-black text-emerald-800">{adminStats.availableSlots}</div>
+                      <div className="mt-2 text-sm text-emerald-700">まだ予約できる30分枠</div>
+                    </div>
+                    <div className="rounded-3xl bg-teal-50 border border-teal-200 p-5">
+                      <div className="flex items-center justify-between">
+                        <span className="text-sm font-bold text-teal-700">使用中</span>
+                        <span className="inline-flex h-3 w-3 rounded-full bg-teal-500"></span>
+                      </div>
+                      <div className="mt-3 text-4xl font-black text-teal-800">{adminStats.usedSlots}</div>
+                      <div className="mt-2 text-sm text-teal-700">予約済みの30分枠</div>
+                    </div>
+                    <div className="rounded-3xl bg-slate-50 border border-slate-200 p-5">
+                      <div className="flex items-center justify-between">
+                        <span className="text-sm font-bold text-slate-600">使用不可</span>
+                        <span className="inline-flex h-3 w-3 rounded-full bg-slate-400"></span>
+                      </div>
+                      <div className="mt-3 text-4xl font-black text-slate-700">{adminStats.unavailableSlots}</div>
+                      <div className="mt-2 text-sm text-slate-500">将来の閉室・点検枠に対応可能</div>
+                    </div>
+                  </div>
+                </section>
+
+                <section className="bg-white rounded-3xl border border-slate-200 p-6 shadow-sm">
+                  <div className="flex items-center justify-between mb-4">
+                    <div>
+                      <h2 className="text-xl font-black text-slate-800">管理ダッシュボード</h2>
+                      <p className="text-sm text-slate-500">選択日の全室の使用状況を、時間帯ごとに一覧で確認できます。</p>
+                    </div>
+                  </div>
+                  <div className="overflow-auto rounded-2xl border border-slate-200">
+                    <table className="w-full min-w-[1100px] text-sm">
+                      <thead className="bg-slate-50 text-slate-600 sticky top-0">
+                        <tr>
+                          <th className="px-3 py-3 text-left">時間</th>
+                          {ROOMS.map((r) => <th key={r} className="px-3 py-3 text-center">{r}</th>)}
                         </tr>
                       </thead>
                       <tbody>
                         {timeSlots.map((t) => (
-                          <tr key={t} className={t === start ? "bg-green-50" : ""}>
-                            <td className="border px-3 py-2">{fmtTime(t)}</td>
-                            <td className="border px-3 py-2">
-                              {ROOMS.filter((r) => isFreeAt(date, r, t, 30)).length}室空き
-                            </td>
+                          <tr key={t} className="border-t border-slate-200">
+                            <td className="px-3 py-3 font-semibold bg-white">{fmtTime(t)}</td>
+                            {ROOMS.map((r) => {
+                              const d = data.find((x) => {
+                                if (x.date !== adminDate || x.room !== r) return false;
+                                const xEnd = x.startMinutes + x.durationMinutes;
+                                return t >= x.startMinutes && t < xEnd;
+                              });
+                              return (
+                                <td key={r + "_" + t} className="px-2 py-2 text-center">
+                                  <div className={`rounded-xl px-2 py-2 ${d ? "bg-teal-600 text-white shadow-sm" : "bg-slate-100 text-slate-500"}`}>
+                                    {d ? d.name : "空き"}
+                                  </div>
+                                </td>
+                              );
+                            })}
                           </tr>
                         ))}
                       </tbody>
                     </table>
                   </div>
-                </div>
-
-                <div>
-                  <h2 className="font-bold mb-2">予約</h2>
-
-                  <form onSubmit={reserve} className="space-y-3 bg-white border rounded-xl p-4 shadow-sm">
-                    <div>
-                      <label className="block text-sm font-bold mb-1">日付</label>
-                      <input
-                        type="date"
-                        min={today()}
-                        max={lastReservableDate()}
-                        value={date}
-                        onChange={(e) => setDate(e.target.value)}
-                        className="border p-2 w-full bg-white rounded"
-                      />
-                    </div>
-
-                    <div>
-                      <label className="block text-sm font-bold mb-1">開始時刻</label>
-                      <select
-                        value={start}
-                        onChange={(e) => setStart(Number(e.target.value))}
-                        className="border p-2 w-full bg-white rounded"
-                      >
-                        {timeSlots.map((t) => (
-                          <option key={t} value={t}>{fmtTime(t)}</option>
-                        ))}
-                      </select>
-                    </div>
-
-                    <div>
-                      <label className="block text-sm font-bold mb-1">利用時間</label>
-                      <select
-                        value={duration}
-                        onChange={(e) => setDuration(Number(e.target.value))}
-                        className="border p-2 w-full bg-white rounded"
-                      >
-                        <option value={30}>30分</option>
-                        <option value={60}>60分</option>
-                        <option value={90}>90分</option>
-                      </select>
-                    </div>
-
-                    <div>
-                      <label className="block text-sm font-bold mb-1">空き部屋</label>
-                      <select
-                        value={room}
-                        onChange={(e) => setRoom(e.target.value)}
-                        className="border p-2 w-full bg-white rounded"
-                      >
-                        <option value="">部屋選択</option>
-                        {freeRooms.map((r) => (
-                          <option key={r} value={r}>{r}</option>
-                        ))}
-                      </select>
-                    </div>
-
-                    <input
-                      placeholder="学籍番号"
-                      value={form.id}
-                      onChange={(e) => setForm({ ...form, id: e.target.value })}
-                      className="border p-2 w-full bg-white rounded"
-                    />
-                    <input
-                      placeholder="氏名"
-                      value={form.name}
-                      onChange={(e) => setForm({ ...form, name: e.target.value })}
-                      className="border p-2 w-full bg-white rounded"
-                    />
-                    <input
-                      placeholder="連絡先"
-                      value={form.contact}
-                      onChange={(e) => setForm({ ...form, contact: e.target.value })}
-                      className="border p-2 w-full bg-white rounded"
-                    />
-                    <input
-                      placeholder="メール"
-                      value={form.email}
-                      onChange={(e) => setForm({ ...form, email: e.target.value })}
-                      className="border p-2 w-full bg-white rounded"
-                    />
-
-                    <button className="w-full bg-green-600 text-white py-2 font-bold rounded hover:bg-green-700">
-                      予約
-                    </button>
-
-                    {msg && <div className="text-red-600 font-bold">{msg}</div>}
-                  </form>
-                </div>
+                </section>
               </div>
-            </div>
-          )}
-
-          {view === "admin" && (
-            <div className="space-y-4">
-              <div className="bg-white border rounded-xl p-4 shadow-sm flex items-center gap-3">
-                <label className="font-bold">表示日</label>
-                <input
-                  type="date"
-                  min={today()}
-                  max={lastReservableDate()}
-                  value={adminDate}
-                  onChange={(e) => setAdminDate(e.target.value)}
-                  className="border p-2 rounded"
-                />
-              </div>
-
-              <div>
-                <h2 className="font-bold mb-2">当日一覧</h2>
-                <div className="overflow-auto bg-white border rounded-xl shadow-sm">
-                  <table className="border-collapse border bg-white text-xs w-full min-w-[1100px]">
-                    <thead>
-                      <tr>
-                        <th className="border px-2 py-2">時間</th>
-                        {ROOMS.map((r) => (
-                          <th key={r} className="border px-2 py-2">{r}</th>
-                        ))}
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {timeSlots.map((t) => (
-                        <tr key={t}>
-                          <td className="border px-2 py-2">{fmtTime(t)}</td>
-                          {ROOMS.map((r) => {
-                            const d = data.find((x) => {
-                              if (x.date !== adminDate || x.room !== r) return false;
-                              const xEnd = x.startMinutes + x.durationMinutes;
-                              return t >= x.startMinutes && t < xEnd;
-                            });
-                            return (
-                              <td key={r + "_" + t} className="border px-2 py-2 text-center">
-                                {d ? d.name : "空"}
-                              </td>
-                            );
-                          })}
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-            </div>
-          )}
+            )}
+          </main>
         </div>
       );
     }
