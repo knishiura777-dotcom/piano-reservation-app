@@ -37,12 +37,29 @@
 
     const pad = (n) => String(n).padStart(2, "0");
     const fmtDate = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
-    const today = () => {
+    const parseDate = (s) => {
+      const [y, m, d] = s.split("-").map(Number);
+      return new Date(y, m - 1, d);
+    };
+    const addDays = (date, days) => {
+      const d = new Date(date);
+      d.setDate(d.getDate() + days);
+      return d;
+    };
+    const todayDate = () => {
       const d = new Date();
       d.setHours(0,0,0,0);
-      return fmtDate(d);
+      return d;
     };
+    const today = () => fmtDate(todayDate());
+    const lastReservableDate = () => fmtDate(addDays(todayDate(), 13));
     const fmtTime = (m) => `${pad(Math.floor(m / 60))}:${pad(m % 60)}`;
+    const dayLabel = (dateStr) => ["日","月","火","水","木","金","土"][parseDate(dateStr).getDay()];
+    const isSameDateStr = (a, b) => a === b;
+    const inReservableRange = (dateStr) => {
+      const value = parseDate(dateStr).getTime();
+      return value >= todayDate().getTime() && value <= addDays(todayDate(), 13).getTime();
+    };
 
     const timeSlots = [];
     for (let h = 9; h < 21; h++) {
@@ -55,8 +72,7 @@
       db = firebase.firestore(app);
     } catch (e) {
       console.error("Firebase初期化エラー:", e);
-      document.getElementById("root").innerHTML =
-        '<div class="p-6 text-red-600 font-bold">Firebase初期化エラー: ' + e.message + '</div>';
+      document.getElementById("root").innerHTML = '<div class="p-6 text-red-600 font-bold">Firebase初期化エラー: ' + e.message + '</div>';
     }
 
     function App() {
@@ -67,6 +83,7 @@
       const [duration, setDuration] = useState(60);
       const [room, setRoom] = useState("");
       const [msg, setMsg] = useState("");
+      const [adminDate, setAdminDate] = useState(today());
 
       const [form, setForm] = useState({
         id: "",
@@ -74,6 +91,11 @@
         contact: "",
         email: ""
       });
+
+      const calendarDates = useMemo(() => {
+        const startDate = todayDate();
+        return Array.from({ length: 14 }, (_, i) => fmtDate(addDays(startDate, i)));
+      }, []);
 
       useEffect(() => {
         if (!db) return;
@@ -111,12 +133,16 @@
         e.preventDefault();
         setMsg("");
 
+        if (!inReservableRange(date)) {
+          setMsg("予約できるのは当日から2週間先までです。");
+          return;
+        }
         if (!room) {
           setMsg("部屋を選択してください");
           return;
         }
-        if (!form.name) {
-          setMsg("氏名を入力してください");
+        if (!form.name || !form.id || !form.contact) {
+          setMsg("学籍番号・氏名・連絡先を入力してください");
           return;
         }
 
@@ -149,7 +175,8 @@
               name: form.name,
               studentId: form.id,
               contact: form.contact,
-              email: form.email
+              email: form.email,
+              createdAt: firebase.firestore.FieldValue.serverTimestamp()
             });
           });
 
@@ -163,151 +190,218 @@
       }
 
       return (
-        <div className="p-6">
-          <div className="mb-4 flex gap-2">
+        <div className="p-6 max-w-7xl mx-auto">
+          <div className="mb-6 flex gap-2">
             <button
               onClick={() => setView("student")}
-              className="px-4 py-2 rounded bg-green-600 text-white font-bold"
+              className={`px-4 py-2 rounded font-bold ${view === "student" ? "bg-green-600 text-white" : "bg-white border text-slate-700"}`}
             >
               学生
             </button>
             <button
               onClick={() => setView("admin")}
-              className="px-4 py-2 rounded bg-indigo-600 text-white font-bold"
+              className={`px-4 py-2 rounded font-bold ${view === "admin" ? "bg-indigo-600 text-white" : "bg-white border text-slate-700"}`}
             >
               管理
             </button>
           </div>
 
           {view === "student" && (
-            <div className="grid md:grid-cols-2 gap-6">
-              <div>
-                <h2 className="font-bold mb-2">空き状況</h2>
-                <table className="border-collapse border bg-white">
-                  <tbody>
-                    {timeSlots.map((t) => (
-                      <tr key={t}>
-                        <td className="border px-3 py-2">{fmtTime(t)}</td>
-                        <td className="border px-3 py-2">
-                          {ROOMS.filter((r) => isFreeAt(date, r, t, 30)).length}室空き
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+            <div className="space-y-6">
+              <div className="bg-white rounded-xl border p-4 shadow-sm">
+                <div className="flex items-center justify-between mb-3">
+                  <div>
+                    <h2 className="text-lg font-bold">予約カレンダー</h2>
+                    <p className="text-sm text-slate-500">当日から2週間先まで選択できます。</p>
+                  </div>
+                  <div className="text-sm text-slate-500">
+                    予約可能期間: {today()} ～ {lastReservableDate()}
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 sm:grid-cols-4 md:grid-cols-7 gap-2">
+                  {calendarDates.map((d) => {
+                    const freeCount = ROOMS.filter((r) => isFreeAt(d, r, start, 30)).length;
+                    const selected = isSameDateStr(d, date);
+                    return (
+                      <button
+                        key={d}
+                        onClick={() => setDate(d)}
+                        className={`rounded-xl border p-3 text-left transition ${selected ? "bg-green-600 text-white border-green-600" : "bg-white hover:bg-green-50"}`}
+                      >
+                        <div className="text-xs opacity-80">{d}</div>
+                        <div className="text-lg font-bold">{dayLabel(d)}</div>
+                        <div className="text-xs mt-1">{freeCount}室以上空き</div>
+                      </button>
+                    );
+                  })}
+                </div>
               </div>
 
-              <div>
-                <h2 className="font-bold mb-2">予約</h2>
+              <div className="grid lg:grid-cols-2 gap-6">
+                <div>
+                  <h2 className="font-bold mb-2">選択日の空き状況</h2>
+                  <div className="overflow-auto bg-white border rounded-xl shadow-sm">
+                    <table className="border-collapse w-full">
+                      <thead>
+                        <tr className="bg-slate-100">
+                          <th className="border px-3 py-2 text-left">時間</th>
+                          <th className="border px-3 py-2 text-left">空き室数</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {timeSlots.map((t) => (
+                          <tr key={t} className={t === start ? "bg-green-50" : ""}>
+                            <td className="border px-3 py-2">{fmtTime(t)}</td>
+                            <td className="border px-3 py-2">
+                              {ROOMS.filter((r) => isFreeAt(date, r, t, 30)).length}室空き
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
 
-                <form onSubmit={reserve} className="space-y-2">
-                  <input
-                    type="date"
-                    value={date}
-                    onChange={(e) => setDate(e.target.value)}
-                    className="border p-2 w-full bg-white"
-                  />
+                <div>
+                  <h2 className="font-bold mb-2">予約</h2>
 
-                  <select
-                    value={start}
-                    onChange={(e) => setStart(Number(e.target.value))}
-                    className="border p-2 w-full bg-white"
-                  >
-                    {timeSlots.map((t) => (
-                      <option key={t} value={t}>{fmtTime(t)}</option>
-                    ))}
-                  </select>
+                  <form onSubmit={reserve} className="space-y-3 bg-white border rounded-xl p-4 shadow-sm">
+                    <div>
+                      <label className="block text-sm font-bold mb-1">日付</label>
+                      <input
+                        type="date"
+                        min={today()}
+                        max={lastReservableDate()}
+                        value={date}
+                        onChange={(e) => setDate(e.target.value)}
+                        className="border p-2 w-full bg-white rounded"
+                      />
+                    </div>
 
-                  <select
-                    value={duration}
-                    onChange={(e) => setDuration(Number(e.target.value))}
-                    className="border p-2 w-full bg-white"
-                  >
-                    <option value={30}>30分</option>
-                    <option value={60}>60分</option>
-                    <option value={90}>90分</option>
-                  </select>
+                    <div>
+                      <label className="block text-sm font-bold mb-1">開始時刻</label>
+                      <select
+                        value={start}
+                        onChange={(e) => setStart(Number(e.target.value))}
+                        className="border p-2 w-full bg-white rounded"
+                      >
+                        {timeSlots.map((t) => (
+                          <option key={t} value={t}>{fmtTime(t)}</option>
+                        ))}
+                      </select>
+                    </div>
 
-                  <select
-                    value={room}
-                    onChange={(e) => setRoom(e.target.value)}
-                    className="border p-2 w-full bg-white"
-                  >
-                    <option value="">部屋選択</option>
-                    {freeRooms.map((r) => (
-                      <option key={r} value={r}>{r}</option>
-                    ))}
-                  </select>
+                    <div>
+                      <label className="block text-sm font-bold mb-1">利用時間</label>
+                      <select
+                        value={duration}
+                        onChange={(e) => setDuration(Number(e.target.value))}
+                        className="border p-2 w-full bg-white rounded"
+                      >
+                        <option value={30}>30分</option>
+                        <option value={60}>60分</option>
+                        <option value={90}>90分</option>
+                      </select>
+                    </div>
 
-                  <input
-                    placeholder="学籍番号"
-                    value={form.id}
-                    onChange={(e) => setForm({ ...form, id: e.target.value })}
-                    className="border p-2 w-full bg-white"
-                  />
-                  <input
-                    placeholder="氏名"
-                    value={form.name}
-                    onChange={(e) => setForm({ ...form, name: e.target.value })}
-                    className="border p-2 w-full bg-white"
-                  />
-                  <input
-                    placeholder="連絡先"
-                    value={form.contact}
-                    onChange={(e) => setForm({ ...form, contact: e.target.value })}
-                    className="border p-2 w-full bg-white"
-                  />
-                  <input
-                    placeholder="メール"
-                    value={form.email}
-                    onChange={(e) => setForm({ ...form, email: e.target.value })}
-                    className="border p-2 w-full bg-white"
-                  />
+                    <div>
+                      <label className="block text-sm font-bold mb-1">空き部屋</label>
+                      <select
+                        value={room}
+                        onChange={(e) => setRoom(e.target.value)}
+                        className="border p-2 w-full bg-white rounded"
+                      >
+                        <option value="">部屋選択</option>
+                        {freeRooms.map((r) => (
+                          <option key={r} value={r}>{r}</option>
+                        ))}
+                      </select>
+                    </div>
 
-                  <button className="w-full bg-green-600 text-white py-2 font-bold rounded">
-                    予約
-                  </button>
-                </form>
+                    <input
+                      placeholder="学籍番号"
+                      value={form.id}
+                      onChange={(e) => setForm({ ...form, id: e.target.value })}
+                      className="border p-2 w-full bg-white rounded"
+                    />
+                    <input
+                      placeholder="氏名"
+                      value={form.name}
+                      onChange={(e) => setForm({ ...form, name: e.target.value })}
+                      className="border p-2 w-full bg-white rounded"
+                    />
+                    <input
+                      placeholder="連絡先"
+                      value={form.contact}
+                      onChange={(e) => setForm({ ...form, contact: e.target.value })}
+                      className="border p-2 w-full bg-white rounded"
+                    />
+                    <input
+                      placeholder="メール"
+                      value={form.email}
+                      onChange={(e) => setForm({ ...form, email: e.target.value })}
+                      className="border p-2 w-full bg-white rounded"
+                    />
 
-                <div className="mt-3 text-red-600 font-bold">{msg}</div>
+                    <button className="w-full bg-green-600 text-white py-2 font-bold rounded hover:bg-green-700">
+                      予約
+                    </button>
+
+                    {msg && <div className="text-red-600 font-bold">{msg}</div>}
+                  </form>
+                </div>
               </div>
             </div>
           )}
 
           {view === "admin" && (
-            <div>
-              <h2 className="font-bold mb-2">当日一覧</h2>
+            <div className="space-y-4">
+              <div className="bg-white border rounded-xl p-4 shadow-sm flex items-center gap-3">
+                <label className="font-bold">表示日</label>
+                <input
+                  type="date"
+                  min={today()}
+                  max={lastReservableDate()}
+                  value={adminDate}
+                  onChange={(e) => setAdminDate(e.target.value)}
+                  className="border p-2 rounded"
+                />
+              </div>
 
-              <div className="overflow-auto">
-                <table className="border-collapse border bg-white text-xs">
-                  <thead>
-                    <tr>
-                      <th className="border px-2 py-2">時間</th>
-                      {ROOMS.map((r) => (
-                        <th key={r} className="border px-2 py-2">{r}</th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {timeSlots.map((t) => (
-                      <tr key={t}>
-                        <td className="border px-2 py-2">{fmtTime(t)}</td>
-                        {ROOMS.map((r) => {
-                          const d = data.find((x) => {
-                            if (x.date !== date || x.room !== r) return false;
-                            const xEnd = x.startMinutes + x.durationMinutes;
-                            return t >= x.startMinutes && t < xEnd;
-                          });
-                          return (
-                            <td key={r + "_" + t} className="border px-2 py-2">
-                              {d ? d.name : "空"}
-                            </td>
-                          );
-                        })}
+              <div>
+                <h2 className="font-bold mb-2">当日一覧</h2>
+                <div className="overflow-auto bg-white border rounded-xl shadow-sm">
+                  <table className="border-collapse border bg-white text-xs w-full min-w-[1100px]">
+                    <thead>
+                      <tr>
+                        <th className="border px-2 py-2">時間</th>
+                        {ROOMS.map((r) => (
+                          <th key={r} className="border px-2 py-2">{r}</th>
+                        ))}
                       </tr>
-                    ))}
-                  </tbody>
-                </table>
+                    </thead>
+                    <tbody>
+                      {timeSlots.map((t) => (
+                        <tr key={t}>
+                          <td className="border px-2 py-2">{fmtTime(t)}</td>
+                          {ROOMS.map((r) => {
+                            const d = data.find((x) => {
+                              if (x.date !== adminDate || x.room !== r) return false;
+                              const xEnd = x.startMinutes + x.durationMinutes;
+                              return t >= x.startMinutes && t < xEnd;
+                            });
+                            return (
+                              <td key={r + "_" + t} className="border px-2 py-2 text-center">
+                                {d ? d.name : "空"}
+                              </td>
+                            );
+                          })}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
               </div>
             </div>
           )}
@@ -320,8 +414,7 @@
       root.render(<App />);
     } catch (e) {
       console.error("描画エラー:", e);
-      document.getElementById("root").innerHTML =
-        '<div class="p-6 text-red-600 font-bold">画面描画エラー: ' + e.message + '</div>';
+      document.getElementById("root").innerHTML = '<div class="p-6 text-red-600 font-bold">画面描画エラー: ' + e.message + '</div>';
     }
   </script>
 </body>
