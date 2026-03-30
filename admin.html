@@ -3,8 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>ピアノプラクティスルーム予約システム</title>
-
+  <title>管理者用 | ピアノプラクティスルーム予約システム</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
   <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
@@ -18,6 +17,8 @@
   <script type="text/babel">
     const { useEffect, useMemo, useState } = React;
 
+    const APP_VERSION = "v0.6.1-admin";
+
     const firebaseConfig = {
       apiKey: "AIzaSyB7dQUc11-6QioG4nWKDO3HQgY7Y_mZfC4",
       authDomain: "piano-reservation-d71cb.firebaseapp.com",
@@ -29,6 +30,7 @@
     };
 
     const COLLECTION_PATH = "artifacts/piano-practice-room-v1/public/data/reservations";
+
     const ROOMS = [
       "B105","B106","B107","B108","B109","B110","B111","B112","B113","B114","B115","B116","B117","B118","B119",
       "B209","B210","B211","B212","B213","B214","B215","B216"
@@ -36,10 +38,6 @@
 
     const pad = (n) => String(n).padStart(2, "0");
     const fmtDate = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
-    const parseDate = (s) => {
-      const [y, m, d] = s.split("-").map(Number);
-      return new Date(y, m - 1, d);
-    };
     const addDays = (date, days) => {
       const d = new Date(date);
       d.setDate(d.getDate() + days);
@@ -47,60 +45,36 @@
     };
     const todayDate = () => {
       const d = new Date();
-      d.setHours(0,0,0,0);
+      d.setHours(0, 0, 0, 0);
       return d;
     };
     const today = () => fmtDate(todayDate());
     const lastReservableDate = () => fmtDate(addDays(todayDate(), 13));
     const fmtTime = (m) => `${pad(Math.floor(m / 60))}:${pad(m % 60)}`;
-    const dayLabel = (dateStr) => ["日","月","火","水","木","金","土"][parseDate(dateStr).getDay()];
-    const inReservableRange = (dateStr) => {
-      const value = parseDate(dateStr).getTime();
-      return value >= todayDate().getTime() && value <= addDays(todayDate(), 13).getTime();
-    };
-    const makeReservationCode = () => {
-      const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-      let out = "PR-";
-      for (let i = 0; i < 8; i++) out += chars[Math.floor(Math.random() * chars.length)];
-      return out;
-    };
+    const blockDocId = (date, room, startMinutes, durationMinutes) => `B_${date}_${room}_${startMinutes}_${durationMinutes}`;
 
     const timeSlots = [];
-    for (let h = 9; h < 21; h++) timeSlots.push(h * 60, h * 60 + 30);
+    for (let h = 9; h < 21; h++) {
+      timeSlots.push(h * 60, h * 60 + 30);
+    }
 
     let db = null;
     try {
       const app = firebase.apps.length ? firebase.app() : firebase.initializeApp(firebaseConfig);
       db = firebase.firestore(app);
     } catch (e) {
-      console.error("Firebase初期化エラー:", e);
-      document.getElementById("root").innerHTML = '<div class="p-6 text-red-600 font-bold">Firebase初期化エラー: ' + e.message + '</div>';
+      document.getElementById("root").innerHTML =
+        '<div class="p-6 text-red-600 font-bold">Firebase初期化エラー: ' + e.message + '</div>';
     }
 
     function App() {
-      const [view, setView] = useState("student");
       const [data, setData] = useState([]);
-      const [date, setDate] = useState(today());
-      const [start, setStart] = useState(9 * 60);
-      const [duration, setDuration] = useState(60);
-      const [room, setRoom] = useState("");
-      const [msg, setMsg] = useState("");
       const [adminDate, setAdminDate] = useState(today());
-      const [cancelCode, setCancelCode] = useState("");
-      const [cancelMsg, setCancelMsg] = useState("");
-      const [latestCode, setLatestCode] = useState("");
-
-      const [form, setForm] = useState({
-        id: "",
-        name: "",
-        contact: "",
-        email: ""
-      });
-
-      const calendarDates = useMemo(() => {
-        const startDate = todayDate();
-        return Array.from({ length: 14 }, (_, i) => fmtDate(addDays(startDate, i)));
-      }, []);
+      const [adminMsg, setAdminMsg] = useState("");
+      const [selectedRoom, setSelectedRoom] = useState(ROOMS[0]);
+      const [selectedStart, setSelectedStart] = useState(9 * 60);
+      const [blockMode, setBlockMode] = useState("30");
+      const [selectedReservation, setSelectedReservation] = useState(null);
 
       useEffect(() => {
         if (!db) return;
@@ -110,34 +84,63 @@
             snapshot.forEach((doc) => arr.push({ id: doc.id, ...doc.data() }));
             setData(arr);
           },
-          (error) => {
-            console.error("Firestore読込エラー:", error);
-            setMsg("Firestore の読み込みに失敗しました。ルールを確認してください。");
-          }
+          () => setAdminMsg("Firestore の読み込みに失敗しました。")
         );
         return () => unsubscribe();
       }, []);
 
-      function isFreeAt(targetDate, targetRoom, targetStart, targetDuration = 30) {
-        const targetEnd = targetStart + targetDuration;
-        return !data.some((d) => {
-          if (d.date !== targetDate || d.room !== targetRoom) return false;
-          const dEnd = d.startMinutes + d.durationMinutes;
-          return Math.max(targetStart, d.startMinutes) < Math.min(targetEnd, dEnd);
+      const reservations = useMemo(() => data.filter((x) => x.status === "reserved"), [data]);
+      const blockedSlots = useMemo(() => data.filter((x) => x.status === "blocked"), [data]);
+
+      function overlaps(aStart, aDur, bStart, bDur) {
+        return Math.max(aStart, bStart) < Math.min(aStart + aDur, bStart + bDur);
+      }
+
+      function getReservationAt(targetDate, targetRoom, targetStart) {
+        return reservations.find((x) => {
+          if (x.date !== targetDate || x.room !== targetRoom) return false;
+          return overlaps(targetStart, 30, x.startMinutes, x.durationMinutes);
         });
       }
 
-      const freeRooms = useMemo(() => ROOMS.filter((r) => isFreeAt(date, r, start, duration)), [data, date, start, duration]);
+      function getBlockAt(targetDate, targetRoom, targetStart) {
+        return blockedSlots.find((x) => {
+          if (x.date !== targetDate || x.room !== targetRoom) return false;
+          return overlaps(targetStart, 30, x.startMinutes, x.durationMinutes);
+        });
+      }
+
+      function getCellStatus(targetDate, targetRoom, targetStart) {
+        const reserved = getReservationAt(targetDate, targetRoom, targetStart);
+        if (reserved) return { type: "reserved", data: reserved };
+
+        const blocked = getBlockAt(targetDate, targetRoom, targetStart);
+        if (blocked) return { type: "blocked", data: blocked };
+
+        return { type: "available", data: null };
+      }
 
       const adminStats = useMemo(() => {
-        const dayRows = data.filter((x) => x.date === adminDate);
-        const uniqueUsers = new Set(dayRows.map((x) => `${x.studentId}_${x.name}`)).size;
-        const usedSlots = dayRows.reduce((sum, x) => sum + (x.durationMinutes / 30), 0);
+        const dayReservations = reservations.filter((x) => x.date === adminDate);
+        const dayBlocked = blockedSlots.filter((x) => x.date === adminDate);
+
+        const uniqueUsers = new Set(dayReservations.map((x) => `${x.studentId}_${x.name}`)).size;
+        const usedSlots = dayReservations.reduce((sum, x) => sum + (x.durationMinutes / 30), 0);
+
+        const blockedSet = new Set();
+        dayBlocked.forEach((b) => {
+          const pieces = b.durationMinutes / 30;
+          for (let i = 0; i < pieces; i++) {
+            blockedSet.add(`${b.room}_${b.startMinutes + i * 30}`);
+          }
+        });
+
+        const unavailableSlots = blockedSet.size;
         const totalSlots = ROOMS.length * timeSlots.length;
-        const availableSlots = Math.max(0, totalSlots - usedSlots);
-        const unavailableSlots = 0;
+        const availableSlots = Math.max(0, totalSlots - usedSlots - unavailableSlots);
+
         return {
-          count: dayRows.length,
+          count: dayReservations.length,
           uniqueUsers,
           utilization: totalSlots ? Math.round((usedSlots / totalSlots) * 1000) / 10 : 0,
           totalSlots,
@@ -145,327 +148,367 @@
           usedSlots,
           unavailableSlots
         };
-      }, [data, adminDate]);
+      }, [reservations, blockedSlots, adminDate]);
 
-      async function reserve(e) {
-        e.preventDefault();
-        setMsg("");
-        setLatestCode("");
+      async function createBlock() {
+        setAdminMsg("");
 
-        if (!inReservableRange(date)) {
-          setMsg("予約できるのは当日から2週間先までです。");
-          return;
-        }
-        if (!room) {
-          setMsg("部屋を選択してください");
-          return;
-        }
-        if (!form.name || !form.id || !form.contact) {
-          setMsg("学籍番号・氏名・連絡先を入力してください");
-          return;
+        let startMinutes = selectedStart;
+        let durationMinutes = Number(blockMode);
+
+        if (blockMode === "allday") {
+          startMinutes = 9 * 60;
+          durationMinutes = 12 * 60;
         }
 
-        const docId = `${date}_${room}_${start}`;
-        const reservationCode = makeReservationCode();
+        const hasReservationOverlap = reservations.some((r) =>
+          r.date === adminDate &&
+          r.room === selectedRoom &&
+          overlaps(startMinutes, durationMinutes, r.startMinutes, r.durationMinutes)
+        );
+
+        if (hasReservationOverlap) {
+          setAdminMsg("予約済みの時間帯が含まれているため、使用不可にできません。");
+          return;
+        }
+
+        const hasBlockOverlap = blockedSlots.some((b) =>
+          b.date === adminDate &&
+          b.room === selectedRoom &&
+          overlaps(startMinutes, durationMinutes, b.startMinutes, b.durationMinutes)
+        );
+
+        if (hasBlockOverlap) {
+          setAdminMsg("既に使用不可が設定されている時間帯が含まれています。");
+          return;
+        }
 
         try {
-          await db.runTransaction(async (tx) => {
-            const ref = db.collection(COLLECTION_PATH).doc(docId);
-            const doc = await tx.get(ref);
-            if (doc.exists) throw new Error("既に予約があります");
-
-            data.forEach((d) => {
-              if (d.date === date && d.room === room) {
-                const end = start + duration;
-                const dEnd = d.startMinutes + d.durationMinutes;
-                if (Math.max(start, d.startMinutes) < Math.min(end, dEnd)) {
-                  throw new Error("時間が重複しています");
-                }
-              }
-            });
-
-            tx.set(ref, {
-              date,
-              room,
-              startMinutes: start,
-              durationMinutes: duration,
-              name: form.name,
-              studentId: form.id,
-              contact: form.contact,
-              email: form.email,
-              reservationCode,
-              createdAt: firebase.firestore.FieldValue.serverTimestamp()
-            });
+          const ref = db.collection(COLLECTION_PATH).doc(blockDocId(adminDate, selectedRoom, startMinutes, durationMinutes));
+          await ref.set({
+            date: adminDate,
+            room: selectedRoom,
+            startMinutes,
+            durationMinutes,
+            status: "blocked",
+            createdAt: firebase.firestore.FieldValue.serverTimestamp()
           });
-
-          setLatestCode(reservationCode);
-          setMsg("予約が完了しました。キャンセル用コードを控えてください。");
-          setForm({ id: "", name: "", contact: "", email: "" });
-          setRoom("");
-        } catch (e) {
-          console.error("予約エラー:", e);
-          setMsg(e.message);
+          setAdminMsg("使用不可を設定しました。");
+        } catch {
+          setAdminMsg("使用不可設定に失敗しました。");
         }
       }
 
-      async function cancelReservation(e) {
-        e.preventDefault();
-        setCancelMsg("");
-        const code = cancelCode.trim().toUpperCase();
-        if (!code) {
-          setCancelMsg("予約コードを入力してください。");
+      async function clearSelectedBlock() {
+        setAdminMsg("");
+
+        const block = getBlockAt(adminDate, selectedRoom, selectedStart);
+        if (!block) {
+          setAdminMsg("選択位置に使用不可設定はありません。");
           return;
         }
+
         try {
-          const snapshot = await db.collection(COLLECTION_PATH).where("reservationCode", "==", code).get();
-          if (snapshot.empty) {
-            setCancelMsg("該当する予約コードが見つかりません。");
-            return;
-          }
-          const doc = snapshot.docs[0];
-          await db.collection(COLLECTION_PATH).doc(doc.id).delete();
-          setCancelMsg("予約をキャンセルしました。");
-          setCancelCode("");
-        } catch (e) {
-          console.error("キャンセルエラー:", e);
-          setCancelMsg("キャンセルに失敗しました。");
+          await db.collection(COLLECTION_PATH).doc(block.id).delete();
+          setAdminMsg("使用不可を解除しました。");
+        } catch {
+          setAdminMsg("解除に失敗しました。");
         }
+      }
+
+      async function deleteSelectedReservation() {
+        setAdminMsg("");
+
+        if (!selectedReservation) {
+          setAdminMsg("削除する予約が選択されていません。");
+          return;
+        }
+
+        const ok = window.confirm(
+          `予約を削除しますか？\n${selectedReservation.room} ${fmtTime(selectedReservation.startMinutes)} - ${fmtTime(selectedReservation.startMinutes + selectedReservation.durationMinutes)}\n${selectedReservation.name}`
+        );
+        if (!ok) return;
+
+        try {
+          await db.collection(COLLECTION_PATH).doc(selectedReservation.id).delete();
+          setAdminMsg("予約を削除しました。");
+          setSelectedReservation(null);
+        } catch (e) {
+          console.error(e);
+          setAdminMsg("予約の削除に失敗しました。");
+        }
+      }
+
+      async function handleCellClick(room, slot) {
+        setSelectedRoom(room);
+        setSelectedStart(slot);
+
+        const block = getBlockAt(adminDate, room, slot);
+        if (block) {
+          setSelectedReservation(null);
+          setAdminMsg(`選択中: ${room} ${fmtTime(slot)}（使用不可）`);
+          return;
+        }
+
+        const reservation = getReservationAt(adminDate, room, slot);
+        if (reservation) {
+          setSelectedReservation(reservation);
+          setAdminMsg(`選択中: ${room} ${fmtTime(slot)}（予約: ${reservation.name}）`);
+          return;
+        }
+
+        setSelectedReservation(null);
+        setAdminMsg(`選択中: ${room} ${fmtTime(slot)}（予約可）`);
       }
 
       return (
         <div className="min-h-screen bg-slate-100">
-          <header className="bg-gradient-to-r from-emerald-600 to-teal-600 text-white shadow-lg">
+          <header className="bg-gradient-to-r from-slate-800 to-slate-700 text-white shadow-lg">
             <div className="max-w-7xl mx-auto px-6 py-8">
-              <h1 className="text-3xl md:text-4xl font-black tracking-tight">ピアノプラクティスルーム予約システム</h1>
-              <p className="mt-3 max-w-3xl text-emerald-50 leading-7">
-                学生が空き状況を確認しながら練習室を予約できるアプリです。予約は当日から2週間先まで対応し、発行された予約コードを使ってあとからキャンセルできます。管理画面では、選択日の利用状況を一覧で把握できます。
-              </p>
-              <div className="mt-5 flex gap-2">
-                <button onClick={() => setView("student")} className={`px-4 py-2 rounded-xl font-bold transition ${view === "student" ? "bg-white text-emerald-700" : "bg-white/20 text-white"}`}>学生画面</button>
-                <button onClick={() => setView("admin")} className={`px-4 py-2 rounded-xl font-bold transition ${view === "admin" ? "bg-white text-teal-700" : "bg-white/20 text-white"}`}>管理画面</button>
+              <div className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
+                <div>
+                  <h1 className="text-3xl md:text-4xl font-black tracking-tight">ピアノプラクティスルーム予約システム</h1>
+                  <p className="mt-3 max-w-3xl text-slate-200 leading-7">
+                    管理者専用ページです。1日の全室状況を確認し、30分・60分・90分・終日の使用不可設定と、予約済み枠の削除ができます。
+                  </p>
+                </div>
+                <div className="text-sm font-bold bg-white/10 rounded-2xl px-4 py-2">
+                  {APP_VERSION}
+                </div>
               </div>
             </div>
           </header>
 
-          <main className="max-w-7xl mx-auto px-6 py-8">
-            {view === "student" && (
-              <div className="space-y-6">
-                <section className="bg-white rounded-3xl border border-slate-200 p-6 shadow-sm">
-                  <h2 className="text-xl font-black text-slate-800">予約カレンダー</h2>
-                  <p className="text-sm text-slate-500 mt-1">当日から2週間先までの日付を選択できます。日付を選ぶと、その日の予約フォームに反映されます。</p>
-                  <div className="mt-5 grid grid-cols-2 sm:grid-cols-4 md:grid-cols-7 gap-3">
-                    {calendarDates.map((d) => {
-                      const selected = d === date;
-                      return (
-                        <button key={d} onClick={() => setDate(d)} className={`rounded-2xl border p-4 text-left transition shadow-sm ${selected ? "bg-emerald-600 text-white border-emerald-600" : "bg-slate-50 hover:bg-emerald-50 border-slate-200 text-slate-700"}`}>
-                          <div className="text-xs opacity-80">{d}</div>
-                          <div className="mt-1 text-lg font-black">{dayLabel(d)}</div>
-                        </button>
-                      );
-                    })}
+          <main className="max-w-7xl mx-auto px-6 py-8 space-y-6">
+            <section className="grid md:grid-cols-2 xl:grid-cols-5 gap-4">
+              <div className="bg-white rounded-3xl border border-slate-200 p-5 shadow-sm md:col-span-2 xl:col-span-1">
+                <div className="text-sm text-slate-500">表示日</div>
+                <input
+                  type="date"
+                  min={today()}
+                  max={lastReservableDate()}
+                  value={adminDate}
+                  onChange={(e) => setAdminDate(e.target.value)}
+                  className="mt-3 w-full rounded-xl border border-slate-300 px-4 py-3"
+                />
+              </div>
+
+              <div className="bg-white rounded-3xl border border-emerald-200 p-5 shadow-sm bg-emerald-50">
+                <div className="text-sm text-emerald-700">予約可</div>
+                <div className="mt-2 text-3xl font-black text-emerald-800">{adminStats.availableSlots}</div>
+                <div className="mt-1 text-xs text-emerald-700">30分枠ベース</div>
+              </div>
+
+              <div className="bg-white rounded-3xl border border-teal-200 p-5 shadow-sm bg-teal-50">
+                <div className="text-sm text-teal-700">使用中</div>
+                <div className="mt-2 text-3xl font-black text-teal-800">{adminStats.usedSlots}</div>
+                <div className="mt-1 text-xs text-teal-700">30分枠ベース</div>
+              </div>
+
+              <div className="bg-white rounded-3xl border border-slate-200 p-5 shadow-sm bg-slate-50">
+                <div className="text-sm text-slate-600">使用不可</div>
+                <div className="mt-2 text-3xl font-black text-slate-700">{adminStats.unavailableSlots}</div>
+                <div className="mt-1 text-xs text-slate-500">管理者設定枠</div>
+              </div>
+
+              <div className="bg-white rounded-3xl border border-indigo-200 p-5 shadow-sm bg-indigo-50">
+                <div className="text-sm text-indigo-700">利用率</div>
+                <div className="mt-2 text-3xl font-black text-indigo-800">{adminStats.utilization}%</div>
+                <div className="mt-1 text-xs text-indigo-700">予約済 / 全枠</div>
+              </div>
+            </section>
+
+            <section className="bg-white rounded-3xl border border-slate-200 p-6 shadow-sm">
+              <div className="grid lg:grid-cols-[1fr,1.2fr] gap-6">
+                <div className="space-y-4">
+                  <div>
+                    <h2 className="text-xl font-black text-slate-800">使用不可設定</h2>
+                    <p className="text-sm text-slate-500 mt-1">30分・60分・90分・終日をまとめて設定できます。</p>
                   </div>
-                </section>
 
-                <div className="grid xl:grid-cols-[1.1fr,0.9fr] gap-6">
-                  <section className="bg-white rounded-3xl border border-slate-200 p-6 shadow-sm">
-                    <h2 className="text-xl font-black text-slate-800 mb-4">選択日の空き状況</h2>
-                    <div className="overflow-x-auto overflow-y-auto rounded-2xl border border-slate-200 max-w-full">
-                      <table className="w-full text-sm">
-                        <thead className="bg-slate-50 text-slate-600 sticky top-0 z-10">
-                          <tr>
-                            <th className="px-4 py-3 text-left">時間</th>
-                            <th className="px-4 py-3 text-left">空き室数</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {timeSlots.map((t) => (
-                            <tr key={t} className={`border-t border-slate-200 ${t === start ? "bg-emerald-50" : "bg-white"}`}>
-                              <td className="px-4 py-3 font-medium">{fmtTime(t)}</td>
-                              <td className="px-4 py-3">{ROOMS.filter((r) => isFreeAt(date, r, t, 30)).length}室空き</td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
+                  <div className="grid sm:grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-sm font-bold text-slate-700 mb-1">部屋</label>
+                      <select
+                        value={selectedRoom}
+                        onChange={(e) => setSelectedRoom(e.target.value)}
+                        className="w-full rounded-xl border border-slate-300 px-4 py-3 bg-white"
+                      >
+                        {ROOMS.map((r) => <option key={r} value={r}>{r}</option>)}
+                      </select>
                     </div>
-                  </section>
 
-                  <div className="space-y-6">
-                    <section className="bg-white rounded-3xl border border-slate-200 p-6 shadow-sm">
-                      <h2 className="text-xl font-black text-slate-800 mb-4">予約する</h2>
-                      <form onSubmit={reserve} className="space-y-3">
-                        <input type="date" min={today()} max={lastReservableDate()} value={date} onChange={(e) => setDate(e.target.value)} className="w-full rounded-xl border border-slate-300 px-4 py-3" />
-                        <select value={start} onChange={(e) => setStart(Number(e.target.value))} className="w-full rounded-xl border border-slate-300 px-4 py-3 bg-white">
-                          {timeSlots.map((t) => <option key={t} value={t}>{fmtTime(t)}</option>)}
-                        </select>
-                        <select value={duration} onChange={(e) => setDuration(Number(e.target.value))} className="w-full rounded-xl border border-slate-300 px-4 py-3 bg-white">
-                          <option value={30}>30分</option>
-                          <option value={60}>60分</option>
-                          <option value={90}>90分</option>
-                        </select>
-                        <select value={room} onChange={(e) => setRoom(e.target.value)} className="w-full rounded-xl border border-slate-300 px-4 py-3 bg-white">
-                          <option value="">空き部屋を選択</option>
-                          {freeRooms.map((r) => <option key={r} value={r}>{r}</option>)}
-                        </select>
-                        <input placeholder="学籍番号" value={form.id} onChange={(e) => setForm({ ...form, id: e.target.value })} className="w-full rounded-xl border border-slate-300 px-4 py-3" />
-                        <input placeholder="氏名" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} className="w-full rounded-xl border border-slate-300 px-4 py-3" />
-                        <input placeholder="連絡先" value={form.contact} onChange={(e) => setForm({ ...form, contact: e.target.value })} className="w-full rounded-xl border border-slate-300 px-4 py-3" />
-                        <input placeholder="メール" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} className="w-full rounded-xl border border-slate-300 px-4 py-3" />
-                        <button className="w-full rounded-xl bg-emerald-600 text-white py-3 font-black hover:bg-emerald-700 transition">予約する</button>
-                        {msg && <div className="rounded-xl bg-emerald-50 text-emerald-800 px-4 py-3 text-sm font-medium">{msg}</div>}
-                        {latestCode && (
-                          <div className="rounded-2xl bg-amber-50 border border-amber-200 px-4 py-4">
-                            <div className="text-sm text-amber-800">キャンセル時に必要な予約コード</div>
-                            <div className="mt-2 text-2xl font-black tracking-widest text-amber-900">{latestCode}</div>
-                          </div>
-                        )}
-                      </form>
-                    </section>
+                    <div>
+                      <label className="block text-sm font-bold text-slate-700 mb-1">開始時刻</label>
+                      <select
+                        value={selectedStart}
+                        onChange={(e) => setSelectedStart(Number(e.target.value))}
+                        className="w-full rounded-xl border border-slate-300 px-4 py-3 bg-white"
+                      >
+                        {timeSlots.map((t) => <option key={t} value={t}>{fmtTime(t)}</option>)}
+                      </select>
+                    </div>
+                  </div>
 
-                    <section className="bg-white rounded-3xl border border-slate-200 p-6 shadow-sm">
-                      <h2 className="text-xl font-black text-slate-800 mb-4">予約をキャンセルする</h2>
-                      <p className="text-sm text-slate-500 mb-3">予約時に発行された予約コードを入力すると、該当予約を削除できます。</p>
-                      <form onSubmit={cancelReservation} className="space-y-3">
-                        <input placeholder="例: PR-AB12CD34" value={cancelCode} onChange={(e) => setCancelCode(e.target.value.toUpperCase())} className="w-full rounded-xl border border-slate-300 px-4 py-3" />
-                        <button className="w-full rounded-xl bg-rose-600 text-white py-3 font-black hover:bg-rose-700 transition">予約コードでキャンセル</button>
-                        {cancelMsg && <div className="rounded-xl bg-rose-50 text-rose-700 px-4 py-3 text-sm font-medium">{cancelMsg}</div>}
-                      </form>
-                    </section>
+                  <div>
+                    <label className="block text-sm font-bold text-slate-700 mb-1">使用不可の長さ</label>
+                    <select
+                      value={blockMode}
+                      onChange={(e) => setBlockMode(e.target.value)}
+                      className="w-full rounded-xl border border-slate-300 px-4 py-3 bg-white"
+                    >
+                      <option value="30">30分まとめて使用不可</option>
+                      <option value="60">60分まとめて使用不可</option>
+                      <option value="90">90分まとめて使用不可</option>
+                      <option value="allday">部屋を終日使用不可</option>
+                    </select>
+                  </div>
+
+                  <div className="flex gap-3">
+                    <button
+                      onClick={createBlock}
+                      className="flex-1 rounded-xl bg-amber-500 text-white py-3 font-black hover:bg-amber-600 transition"
+                    >
+                      使用不可に設定
+                    </button>
+                    <button
+                      onClick={clearSelectedBlock}
+                      className="flex-1 rounded-xl bg-slate-700 text-white py-3 font-black hover:bg-slate-800 transition"
+                    >
+                      選択位置の使用不可を解除
+                    </button>
+                  </div>
+
+                  <div className="bg-slate-50 border border-slate-200 rounded-3xl p-5">
+                    <h3 className="text-lg font-black text-slate-800">選択中の予約</h3>
+                    {!selectedReservation ? (
+                      <p className="mt-3 text-sm text-slate-500">予約済みセルをクリックすると、ここに詳細が表示されます。</p>
+                    ) : (
+                      <div className="mt-3 space-y-2 text-sm text-slate-700">
+                        <div><span className="font-bold">部屋:</span> {selectedReservation.room}</div>
+                        <div><span className="font-bold">時間:</span> {fmtTime(selectedReservation.startMinutes)} - {fmtTime(selectedReservation.startMinutes + selectedReservation.durationMinutes)}</div>
+                        <div><span className="font-bold">氏名:</span> {selectedReservation.name}</div>
+                        <div><span className="font-bold">学籍番号:</span> {selectedReservation.studentId || "-"}</div>
+                        <div><span className="font-bold">連絡先:</span> {selectedReservation.contact || "-"}</div>
+                        <div><span className="font-bold">メール:</span> {selectedReservation.email || "-"}</div>
+                        <div><span className="font-bold">予約コード:</span> {selectedReservation.reservationCode || "-"}</div>
+                        <button
+                          onClick={deleteSelectedReservation}
+                          className="mt-4 w-full rounded-xl bg-rose-600 text-white py-3 font-black hover:bg-rose-700 transition"
+                        >
+                          この予約を削除
+                        </button>
+                      </div>
+                    )}
+                  </div>
+
+                  {adminMsg && (
+                    <div className="rounded-xl bg-amber-50 text-amber-800 px-4 py-3 text-sm font-medium">
+                      {adminMsg}
+                    </div>
+                  )}
+                </div>
+
+                <div className="grid md:grid-cols-3 gap-4">
+                  <div className="rounded-3xl bg-emerald-50 border border-emerald-200 p-5">
+                    <div className="flex items-center justify-between">
+                      <span className="text-sm font-bold text-emerald-700">予約可</span>
+                      <span className="inline-flex h-3 w-3 rounded-full bg-emerald-500"></span>
+                    </div>
+                    <div className="mt-3 text-4xl font-black text-emerald-800">{adminStats.availableSlots}</div>
+                    <div className="mt-2 text-sm text-emerald-700">まだ予約できる30分枠</div>
+                  </div>
+
+                  <div className="rounded-3xl bg-teal-50 border border-teal-200 p-5">
+                    <div className="flex items-center justify-between">
+                      <span className="text-sm font-bold text-teal-700">使用中</span>
+                      <span className="inline-flex h-3 w-3 rounded-full bg-teal-500"></span>
+                    </div>
+                    <div className="mt-3 text-4xl font-black text-teal-800">{adminStats.usedSlots}</div>
+                    <div className="mt-2 text-sm text-teal-700">予約済みの30分枠</div>
+                  </div>
+
+                  <div className="rounded-3xl bg-slate-50 border border-slate-200 p-5">
+                    <div className="flex items-center justify-between">
+                      <span className="text-sm font-bold text-slate-600">使用不可</span>
+                      <span className="inline-flex h-3 w-3 rounded-full bg-slate-400"></span>
+                    </div>
+                    <div className="mt-3 text-4xl font-black text-slate-700">{adminStats.unavailableSlots}</div>
+                    <div className="mt-2 text-sm text-slate-500">管理者が停止した30分枠</div>
                   </div>
                 </div>
               </div>
-            )}
+            </section>
 
-            {view === "admin" && (
-              <div className="space-y-6">
-                <section className="grid md:grid-cols-2 xl:grid-cols-5 gap-4">
-                  <div className="bg-white rounded-3xl border border-slate-200 p-5 shadow-sm md:col-span-2 xl:col-span-1">
-                    <div className="text-sm text-slate-500">表示日</div>
-                    <input type="date" min={today()} max={lastReservableDate()} value={adminDate} onChange={(e) => setAdminDate(e.target.value)} className="mt-3 w-full rounded-xl border border-slate-300 px-4 py-3" />
-                  </div>
-                  <div className="bg-white rounded-3xl border border-emerald-200 p-5 shadow-sm bg-emerald-50">
-                    <div className="text-sm text-emerald-700">予約可</div>
-                    <div className="mt-2 text-3xl font-black text-emerald-800">{adminStats.availableSlots}</div>
-                    <div className="mt-1 text-xs text-emerald-700">30分枠ベース</div>
-                  </div>
-                  <div className="bg-white rounded-3xl border border-teal-200 p-5 shadow-sm bg-teal-50">
-                    <div className="text-sm text-teal-700">使用中</div>
-                    <div className="mt-2 text-3xl font-black text-teal-800">{adminStats.usedSlots}</div>
-                    <div className="mt-1 text-xs text-teal-700">30分枠ベース</div>
-                  </div>
-                  <div className="bg-white rounded-3xl border border-slate-200 p-5 shadow-sm bg-slate-50">
-                    <div className="text-sm text-slate-600">使用不可</div>
-                    <div className="mt-2 text-3xl font-black text-slate-700">{adminStats.unavailableSlots}</div>
-                    <div className="mt-1 text-xs text-slate-500">現在は固定ブロックなし</div>
-                  </div>
-                  <div className="bg-white rounded-3xl border border-indigo-200 p-5 shadow-sm bg-indigo-50">
-                    <div className="text-sm text-indigo-700">利用率</div>
-                    <div className="mt-2 text-3xl font-black text-indigo-800">{adminStats.utilization}%</div>
-                    <div className="mt-1 text-xs text-indigo-700">予約済 / 全枠</div>
-                  </div>
-                </section>
-
-                <section className="grid md:grid-cols-3 gap-4">
-                  <div className="bg-white rounded-3xl border border-slate-200 p-5 shadow-sm">
-                    <div className="text-sm text-slate-500">予約件数</div>
-                    <div className="mt-2 text-3xl font-black text-slate-800">{adminStats.count}</div>
-                  </div>
-                  <div className="bg-white rounded-3xl border border-slate-200 p-5 shadow-sm">
-                    <div className="text-sm text-slate-500">利用者数</div>
-                    <div className="mt-2 text-3xl font-black text-slate-800">{adminStats.uniqueUsers}</div>
-                  </div>
-                  <div className="bg-white rounded-3xl border border-slate-200 p-5 shadow-sm">
-                    <div className="text-sm text-slate-500">総枠数</div>
-                    <div className="mt-2 text-3xl font-black text-slate-800">{adminStats.totalSlots}</div>
-                    <div className="mt-1 text-xs text-slate-500">23室 × 24枠</div>
-                  </div>
-                </section>
-
-                <section className="bg-white rounded-3xl border border-slate-200 p-6 shadow-sm">
-                  <div className="mb-5">
-                    <h2 className="text-xl font-black text-slate-800">1日の状況ダッシュボード</h2>
-                    <p className="text-sm text-slate-500">選択日の30分枠を集計し、予約可・使用中・使用不可の状況を一覧で確認できます。</p>
-                  </div>
-                  <div className="grid md:grid-cols-3 gap-4">
-                    <div className="rounded-3xl bg-emerald-50 border border-emerald-200 p-5">
-                      <div className="flex items-center justify-between">
-                        <span className="text-sm font-bold text-emerald-700">予約可</span>
-                        <span className="inline-flex h-3 w-3 rounded-full bg-emerald-500"></span>
-                      </div>
-                      <div className="mt-3 text-4xl font-black text-emerald-800">{adminStats.availableSlots}</div>
-                      <div className="mt-2 text-sm text-emerald-700">まだ予約できる30分枠</div>
-                    </div>
-                    <div className="rounded-3xl bg-teal-50 border border-teal-200 p-5">
-                      <div className="flex items-center justify-between">
-                        <span className="text-sm font-bold text-teal-700">使用中</span>
-                        <span className="inline-flex h-3 w-3 rounded-full bg-teal-500"></span>
-                      </div>
-                      <div className="mt-3 text-4xl font-black text-teal-800">{adminStats.usedSlots}</div>
-                      <div className="mt-2 text-sm text-teal-700">予約済みの30分枠</div>
-                    </div>
-                    <div className="rounded-3xl bg-slate-50 border border-slate-200 p-5">
-                      <div className="flex items-center justify-between">
-                        <span className="text-sm font-bold text-slate-600">使用不可</span>
-                        <span className="inline-flex h-3 w-3 rounded-full bg-slate-400"></span>
-                      </div>
-                      <div className="mt-3 text-4xl font-black text-slate-700">{adminStats.unavailableSlots}</div>
-                      <div className="mt-2 text-sm text-slate-500">将来の閉室・点検枠に対応可能</div>
-                    </div>
-                  </div>
-                </section>
-
-                <section className="bg-white rounded-3xl border border-slate-200 p-6 shadow-sm">
-                  <div className="flex items-center justify-between mb-4">
-                    <div>
-                      <h2 className="text-xl font-black text-slate-800">管理ダッシュボード</h2>
-                      <p className="text-sm text-slate-500">選択日の全室の使用状況を、時間帯ごとに一覧で確認できます。</p>
-                    </div>
-                  </div>
-                  <div className="overflow-x-auto overflow-y-auto rounded-2xl border border-slate-200 max-w-full">
-                    <table className="w-max min-w-[1600px] text-sm table-auto">
-                      <thead className="bg-slate-50 text-slate-600 sticky top-0">
-                        <tr>
-                          <th className="px-3 py-3 text-left sticky left-0 bg-slate-50 z-20 min-w-[84px]">時間</th>
-                          {ROOMS.map((r) => <th key={r} className="px-3 py-3 text-center min-w-[88px]">{r}</th>)}
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {timeSlots.map((t) => (
-                          <tr key={t} className="border-t border-slate-200">
-                            <td className="px-3 py-3 font-semibold bg-white sticky left-0 z-10 min-w-[84px]">{fmtTime(t)}</td>
-                            {ROOMS.map((r) => {
-                              const d = data.find((x) => {
-                                if (x.date !== adminDate || x.room !== r) return false;
-                                const xEnd = x.startMinutes + x.durationMinutes;
-                                return t >= x.startMinutes && t < xEnd;
-                              });
-                              return (
-                                <td key={r + "_" + t} className="px-2 py-2 text-center">
-                                  <div className={`rounded-xl px-2 py-2 ${d ? "bg-teal-600 text-white shadow-sm" : "bg-slate-100 text-slate-500"}`}>
-                                    {d ? d.name : "空き"}
-                                  </div>
-                                </td>
-                              );
-                            })}
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                </section>
+            <section className="bg-white rounded-3xl border border-slate-200 p-6 shadow-sm">
+              <div className="mb-4">
+                <h2 className="text-xl font-black text-slate-800">1日の状況ダッシュボード</h2>
+                <p className="text-sm text-slate-500">セルをクリックすると、左側の設定フォームに部屋と時間が反映されます。予約済みセルをクリックすると削除対象として選択されます。</p>
               </div>
-            )}
+
+              <div className="overflow-x-auto overflow-y-auto rounded-2xl border border-slate-200 max-w-full">
+                <table className="w-max min-w-[1600px] text-sm table-auto">
+                  <thead className="bg-slate-50 text-slate-600 sticky top-0 z-10">
+                    <tr>
+                      <th className="px-3 py-3 text-left sticky left-0 bg-slate-50 z-20 min-w-[84px]">時間</th>
+                      {ROOMS.map((r) => <th key={r} className="px-3 py-3 text-center min-w-[88px]">{r}</th>)}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {timeSlots.map((t) => (
+                      <tr key={t} className="border-t border-slate-200">
+                        <td className="px-3 py-3 font-semibold bg-white sticky left-0 z-10 min-w-[84px]">{fmtTime(t)}</td>
+                        {ROOMS.map((r) => {
+                          const cell = getCellStatus(adminDate, r, t);
+
+                          let cellClass = "bg-emerald-50 text-emerald-700";
+                          let label = "予約可";
+
+                          if (cell.type === "reserved") {
+                            cellClass = "bg-teal-600 text-white";
+                            label = cell.data.name;
+                          } else if (cell.type === "blocked") {
+                            cellClass = "bg-slate-500 text-white";
+                            label = "使用不可";
+                          }
+
+                          const selected = selectedRoom === r && selectedStart === t;
+
+                          return (
+                            <td key={r + "_" + t} className="px-2 py-2 text-center">
+                              <button
+                                onClick={() => handleCellClick(r, t)}
+                                className={`w-full rounded-xl px-2 py-2 transition border ${selected ? "ring-2 ring-amber-400" : "border-transparent"} ${cellClass}`}
+                              >
+                                {label}
+                              </button>
+                            </td>
+                          );
+                        })}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+
+              <div className="mt-4 flex flex-wrap gap-4 text-sm text-slate-600">
+                <div className="flex items-center gap-2">
+                  <span className="inline-flex h-3 w-3 rounded-full bg-emerald-500"></span> 予約可
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className="inline-flex h-3 w-3 rounded-full bg-teal-500"></span> 使用中
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className="inline-flex h-3 w-3 rounded-full bg-slate-500"></span> 使用不可
+                </div>
+              </div>
+            </section>
           </main>
         </div>
       );
     }
 
-    try {
-      const root = ReactDOM.createRoot(document.getElementById("root"));
-      root.render(<App />);
-    } catch (e) {
-      console.error("描画エラー:", e);
-      document.getElementById("root").innerHTML = '<div class="p-6 text-red-600 font-bold">画面描画エラー: ' + e.message + '</div>';
-    }
+    ReactDOM.createRoot(document.getElementById("root")).render(<App />);
   </script>
 </body>
 </html>
