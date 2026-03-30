@@ -1,0 +1,328 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ピアノプラクティスルーム予約</title>
+
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore-compat.js"></script>
+</head>
+<body class="bg-slate-50">
+  <div id="root" class="p-6 text-slate-700">読み込み中...</div>
+
+  <script type="text/babel">
+    const { useEffect, useMemo, useState } = React;
+
+    const firebaseConfig = {
+      apiKey: "AIzaSyB7dQUc11-6QioG4nWKDO3HQgY7Y_mZfC4",
+      authDomain: "piano-reservation-d71cb.firebaseapp.com",
+      projectId: "piano-reservation-d71cb",
+      storageBucket: "piano-reservation-d71cb.firebasestorage.app",
+      messagingSenderId: "390847099958",
+      appId: "1:390847099958:web:75f96ed7c8b8f69705d497",
+      measurementId: "G-FF6757RVFS"
+    };
+
+    const COLLECTION_PATH = "artifacts/piano-practice-room-v1/public/data/reservations";
+
+    const ROOMS = [
+      "B105","B106","B107","B108","B109","B110","B111","B112","B113","B114","B115","B116","B117","B118","B119",
+      "B209","B210","B211","B212","B213","B214","B215","B216"
+    ];
+
+    const pad = (n) => String(n).padStart(2, "0");
+    const fmtDate = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+    const today = () => {
+      const d = new Date();
+      d.setHours(0,0,0,0);
+      return fmtDate(d);
+    };
+    const fmtTime = (m) => `${pad(Math.floor(m / 60))}:${pad(m % 60)}`;
+
+    const timeSlots = [];
+    for (let h = 9; h < 21; h++) {
+      timeSlots.push(h * 60, h * 60 + 30);
+    }
+
+    let db = null;
+    try {
+      const app = firebase.apps.length ? firebase.app() : firebase.initializeApp(firebaseConfig);
+      db = firebase.firestore(app);
+    } catch (e) {
+      console.error("Firebase初期化エラー:", e);
+      document.getElementById("root").innerHTML =
+        '<div class="p-6 text-red-600 font-bold">Firebase初期化エラー: ' + e.message + '</div>';
+    }
+
+    function App() {
+      const [view, setView] = useState("student");
+      const [data, setData] = useState([]);
+      const [date, setDate] = useState(today());
+      const [start, setStart] = useState(9 * 60);
+      const [duration, setDuration] = useState(60);
+      const [room, setRoom] = useState("");
+      const [msg, setMsg] = useState("");
+
+      const [form, setForm] = useState({
+        id: "",
+        name: "",
+        contact: "",
+        email: ""
+      });
+
+      useEffect(() => {
+        if (!db) return;
+
+        const unsubscribe = db.collection(COLLECTION_PATH).onSnapshot(
+          (snapshot) => {
+            const arr = [];
+            snapshot.forEach((doc) => arr.push({ id: doc.id, ...doc.data() }));
+            setData(arr);
+          },
+          (error) => {
+            console.error("Firestore読込エラー:", error);
+            setMsg("Firestore の読み込みに失敗しました。ルールを確認してください。");
+          }
+        );
+
+        return () => unsubscribe();
+      }, []);
+
+      function isFreeAt(targetDate, targetRoom, targetStart, targetDuration = 30) {
+        const targetEnd = targetStart + targetDuration;
+
+        return !data.some((d) => {
+          if (d.date !== targetDate || d.room !== targetRoom) return false;
+          const dEnd = d.startMinutes + d.durationMinutes;
+          return Math.max(targetStart, d.startMinutes) < Math.min(targetEnd, dEnd);
+        });
+      }
+
+      const freeRooms = useMemo(() => {
+        return ROOMS.filter((r) => isFreeAt(date, r, start, duration));
+      }, [data, date, start, duration]);
+
+      async function reserve(e) {
+        e.preventDefault();
+        setMsg("");
+
+        if (!room) {
+          setMsg("部屋を選択してください");
+          return;
+        }
+        if (!form.name) {
+          setMsg("氏名を入力してください");
+          return;
+        }
+
+        const docId = `${date}_${room}_${start}`;
+
+        try {
+          await db.runTransaction(async (tx) => {
+            const ref = db.collection(COLLECTION_PATH).doc(docId);
+            const doc = await tx.get(ref);
+
+            if (doc.exists) {
+              throw new Error("既に予約があります");
+            }
+
+            data.forEach((d) => {
+              if (d.date === date && d.room === room) {
+                const end = start + duration;
+                const dEnd = d.startMinutes + d.durationMinutes;
+                if (Math.max(start, d.startMinutes) < Math.min(end, dEnd)) {
+                  throw new Error("時間が重複しています");
+                }
+              }
+            });
+
+            tx.set(ref, {
+              date,
+              room,
+              startMinutes: start,
+              durationMinutes: duration,
+              name: form.name,
+              studentId: form.id,
+              contact: form.contact,
+              email: form.email
+            });
+          });
+
+          setMsg("予約完了");
+          setForm({ id: "", name: "", contact: "", email: "" });
+          setRoom("");
+        } catch (e) {
+          console.error("予約エラー:", e);
+          setMsg(e.message);
+        }
+      }
+
+      return (
+        <div className="p-6">
+          <div className="mb-4 flex gap-2">
+            <button
+              onClick={() => setView("student")}
+              className="px-4 py-2 rounded bg-green-600 text-white font-bold"
+            >
+              学生
+            </button>
+            <button
+              onClick={() => setView("admin")}
+              className="px-4 py-2 rounded bg-indigo-600 text-white font-bold"
+            >
+              管理
+            </button>
+          </div>
+
+          {view === "student" && (
+            <div className="grid md:grid-cols-2 gap-6">
+              <div>
+                <h2 className="font-bold mb-2">空き状況</h2>
+                <table className="border-collapse border bg-white">
+                  <tbody>
+                    {timeSlots.map((t) => (
+                      <tr key={t}>
+                        <td className="border px-3 py-2">{fmtTime(t)}</td>
+                        <td className="border px-3 py-2">
+                          {ROOMS.filter((r) => isFreeAt(date, r, t, 30)).length}室空き
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+
+              <div>
+                <h2 className="font-bold mb-2">予約</h2>
+
+                <form onSubmit={reserve} className="space-y-2">
+                  <input
+                    type="date"
+                    value={date}
+                    onChange={(e) => setDate(e.target.value)}
+                    className="border p-2 w-full bg-white"
+                  />
+
+                  <select
+                    value={start}
+                    onChange={(e) => setStart(Number(e.target.value))}
+                    className="border p-2 w-full bg-white"
+                  >
+                    {timeSlots.map((t) => (
+                      <option key={t} value={t}>{fmtTime(t)}</option>
+                    ))}
+                  </select>
+
+                  <select
+                    value={duration}
+                    onChange={(e) => setDuration(Number(e.target.value))}
+                    className="border p-2 w-full bg-white"
+                  >
+                    <option value={30}>30分</option>
+                    <option value={60}>60分</option>
+                    <option value={90}>90分</option>
+                  </select>
+
+                  <select
+                    value={room}
+                    onChange={(e) => setRoom(e.target.value)}
+                    className="border p-2 w-full bg-white"
+                  >
+                    <option value="">部屋選択</option>
+                    {freeRooms.map((r) => (
+                      <option key={r} value={r}>{r}</option>
+                    ))}
+                  </select>
+
+                  <input
+                    placeholder="学籍番号"
+                    value={form.id}
+                    onChange={(e) => setForm({ ...form, id: e.target.value })}
+                    className="border p-2 w-full bg-white"
+                  />
+                  <input
+                    placeholder="氏名"
+                    value={form.name}
+                    onChange={(e) => setForm({ ...form, name: e.target.value })}
+                    className="border p-2 w-full bg-white"
+                  />
+                  <input
+                    placeholder="連絡先"
+                    value={form.contact}
+                    onChange={(e) => setForm({ ...form, contact: e.target.value })}
+                    className="border p-2 w-full bg-white"
+                  />
+                  <input
+                    placeholder="メール"
+                    value={form.email}
+                    onChange={(e) => setForm({ ...form, email: e.target.value })}
+                    className="border p-2 w-full bg-white"
+                  />
+
+                  <button className="w-full bg-green-600 text-white py-2 font-bold rounded">
+                    予約
+                  </button>
+                </form>
+
+                <div className="mt-3 text-red-600 font-bold">{msg}</div>
+              </div>
+            </div>
+          )}
+
+          {view === "admin" && (
+            <div>
+              <h2 className="font-bold mb-2">当日一覧</h2>
+
+              <div className="overflow-auto">
+                <table className="border-collapse border bg-white text-xs">
+                  <thead>
+                    <tr>
+                      <th className="border px-2 py-2">時間</th>
+                      {ROOMS.map((r) => (
+                        <th key={r} className="border px-2 py-2">{r}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {timeSlots.map((t) => (
+                      <tr key={t}>
+                        <td className="border px-2 py-2">{fmtTime(t)}</td>
+                        {ROOMS.map((r) => {
+                          const d = data.find((x) => {
+                            if (x.date !== date || x.room !== r) return false;
+                            const xEnd = x.startMinutes + x.durationMinutes;
+                            return t >= x.startMinutes && t < xEnd;
+                          });
+                          return (
+                            <td key={r + "_" + t} className="border px-2 py-2">
+                              {d ? d.name : "空"}
+                            </td>
+                          );
+                        })}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    try {
+      const root = ReactDOM.createRoot(document.getElementById("root"));
+      root.render(<App />);
+    } catch (e) {
+      console.error("描画エラー:", e);
+      document.getElementById("root").innerHTML =
+        '<div class="p-6 text-red-600 font-bold">画面描画エラー: ' + e.message + '</div>';
+    }
+  </script>
+</body>
+</html>
