@@ -1,0 +1,421 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>学生用 | ピアノプラクティスルーム予約システム</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore-compat.js"></script>
+</head>
+<body class="bg-slate-100">
+  <div id="root" class="p-6 text-slate-700">読み込み中...</div>
+
+  <script type="text/babel">
+    const { useEffect, useMemo, useState } = React;
+
+    const APP_VERSION = "v0.6.0-student";
+
+    const firebaseConfig = {
+      apiKey: "AIzaSyB7dQUc11-6QioG4nWKDO3HQgY7Y_mZfC4",
+      authDomain: "piano-reservation-d71cb.firebaseapp.com",
+      projectId: "piano-reservation-d71cb",
+      storageBucket: "piano-reservation-d71cb.firebasestorage.app",
+      messagingSenderId: "390847099958",
+      appId: "1:390847099958:web:75f96ed7c8b8f69705d497",
+      measurementId: "G-FF6757RVFS"
+    };
+
+    const COLLECTION_PATH = "artifacts/piano-practice-room-v1/public/data/reservations";
+
+    const ROOMS = [
+      "B105","B106","B107","B108","B109","B110","B111","B112","B113","B114","B115","B116","B117","B118","B119",
+      "B209","B210","B211","B212","B213","B214","B215","B216"
+    ];
+
+    const pad = (n) => String(n).padStart(2, "0");
+    const fmtDate = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+    const parseDate = (s) => {
+      const [y, m, d] = s.split("-").map(Number);
+      return new Date(y, m - 1, d);
+    };
+    const addDays = (date, days) => {
+      const d = new Date(date);
+      d.setDate(d.getDate() + days);
+      return d;
+    };
+    const todayDate = () => {
+      const d = new Date();
+      d.setHours(0, 0, 0, 0);
+      return d;
+    };
+    const today = () => fmtDate(todayDate());
+    const lastReservableDate = () => fmtDate(addDays(todayDate(), 13));
+    const fmtTime = (m) => `${pad(Math.floor(m / 60))}:${pad(m % 60)}`;
+    const dayLabel = (dateStr) => ["日","月","火","水","木","金","土"][parseDate(dateStr).getDay()];
+    const inReservableRange = (dateStr) => {
+      const value = parseDate(dateStr).getTime();
+      return value >= todayDate().getTime() && value <= addDays(todayDate(), 13).getTime();
+    };
+    const makeReservationCode = () => {
+      const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+      let out = "PR-";
+      for (let i = 0; i < 8; i++) out += chars[Math.floor(Math.random() * chars.length)];
+      return out;
+    };
+    const reservationDocId = (date, room, startMinutes) => `R_${date}_${room}_${startMinutes}`;
+
+    const timeSlots = [];
+    for (let h = 9; h < 21; h++) {
+      timeSlots.push(h * 60, h * 60 + 30);
+    }
+
+    let db = null;
+    try {
+      const app = firebase.apps.length ? firebase.app() : firebase.initializeApp(firebaseConfig);
+      db = firebase.firestore(app);
+    } catch (e) {
+      document.getElementById("root").innerHTML =
+        '<div class="p-6 text-red-600 font-bold">Firebase初期化エラー: ' + e.message + '</div>';
+    }
+
+    function App() {
+      const [data, setData] = useState([]);
+      const [date, setDate] = useState(today());
+      const [start, setStart] = useState(9 * 60);
+      const [duration, setDuration] = useState(60);
+      const [room, setRoom] = useState("");
+      const [msg, setMsg] = useState("");
+      const [cancelCode, setCancelCode] = useState("");
+      const [cancelMsg, setCancelMsg] = useState("");
+      const [latestCode, setLatestCode] = useState("");
+
+      const [form, setForm] = useState({
+        id: "",
+        name: "",
+        contact: "",
+        email: ""
+      });
+
+      const calendarDates = useMemo(() => {
+        const base = todayDate();
+        return Array.from({ length: 14 }, (_, i) => fmtDate(addDays(base, i)));
+      }, []);
+
+      useEffect(() => {
+        if (!db) return;
+        const unsubscribe = db.collection(COLLECTION_PATH).onSnapshot(
+          (snapshot) => {
+            const arr = [];
+            snapshot.forEach((doc) => arr.push({ id: doc.id, ...doc.data() }));
+            setData(arr);
+          },
+          () => setMsg("Firestore の読み込みに失敗しました。")
+        );
+        return () => unsubscribe();
+      }, []);
+
+      const reservations = useMemo(() => data.filter((x) => x.status === "reserved"), [data]);
+      const blockedSlots = useMemo(() => data.filter((x) => x.status === "blocked"), [data]);
+
+      function overlaps(aStart, aDur, bStart, bDur) {
+        return Math.max(aStart, bStart) < Math.min(aStart + aDur, bStart + bDur);
+      }
+
+      function isBlockedAt(targetDate, targetRoom, targetStart, targetDuration = 30) {
+        return blockedSlots.some((d) => {
+          if (d.date !== targetDate || d.room !== targetRoom) return false;
+          return overlaps(targetStart, targetDuration, d.startMinutes, d.durationMinutes);
+        });
+      }
+
+      function isReservedAt(targetDate, targetRoom, targetStart, targetDuration = 30) {
+        return reservations.some((d) => {
+          if (d.date !== targetDate || d.room !== targetRoom) return false;
+          return overlaps(targetStart, targetDuration, d.startMinutes, d.durationMinutes);
+        });
+      }
+
+      function isFreeAt(targetDate, targetRoom, targetStart, targetDuration = 30) {
+        if (isBlockedAt(targetDate, targetRoom, targetStart, targetDuration)) return false;
+        if (isReservedAt(targetDate, targetRoom, targetStart, targetDuration)) return false;
+        return true;
+      }
+
+      const freeRooms = useMemo(() => {
+        return ROOMS.filter((r) => isFreeAt(date, r, start, duration));
+      }, [reservations, blockedSlots, date, start, duration]);
+
+      async function reserve(e) {
+        e.preventDefault();
+        setMsg("");
+        setLatestCode("");
+
+        if (!inReservableRange(date)) {
+          setMsg("予約できるのは当日から2週間先までです。");
+          return;
+        }
+        if (!room) {
+          setMsg("部屋を選択してください。");
+          return;
+        }
+        if (!form.id || !form.name || !form.contact) {
+          setMsg("学籍番号・氏名・連絡先を入力してください。");
+          return;
+        }
+        if (!isFreeAt(date, room, start, duration)) {
+          setMsg("その部屋は予約できません。");
+          return;
+        }
+
+        const reservationCode = makeReservationCode();
+        const docId = reservationDocId(date, room, start);
+
+        try {
+          await db.runTransaction(async (tx) => {
+            const ref = db.collection(COLLECTION_PATH).doc(docId);
+            const doc = await tx.get(ref);
+            if (doc.exists) throw new Error("既に予約があります。");
+
+            const hasReservedOverlap = reservations.some((d) =>
+              d.date === date && d.room === room && overlaps(start, duration, d.startMinutes, d.durationMinutes)
+            );
+            if (hasReservedOverlap) throw new Error("時間が重複しています。");
+
+            const hasBlockedOverlap = blockedSlots.some((d) =>
+              d.date === date && d.room === room && overlaps(start, duration, d.startMinutes, d.durationMinutes)
+            );
+            if (hasBlockedOverlap) throw new Error("使用不可の時間帯が含まれています。");
+
+            tx.set(ref, {
+              date,
+              room,
+              startMinutes: start,
+              durationMinutes: duration,
+              name: form.name,
+              studentId: form.id,
+              contact: form.contact,
+              email: form.email,
+              reservationCode,
+              status: "reserved",
+              createdAt: firebase.firestore.FieldValue.serverTimestamp()
+            });
+          });
+
+          setLatestCode(reservationCode);
+          setMsg("予約が完了しました。予約コードを控えてください。");
+          setForm({ id: "", name: "", contact: "", email: "" });
+          setRoom("");
+        } catch (e) {
+          setMsg(e.message || "予約に失敗しました。");
+        }
+      }
+
+      async function cancelReservation(e) {
+        e.preventDefault();
+        setCancelMsg("");
+        const code = cancelCode.trim().toUpperCase();
+        if (!code) {
+          setCancelMsg("予約コードを入力してください。");
+          return;
+        }
+
+        try {
+          const snapshot = await db.collection(COLLECTION_PATH)
+            .where("reservationCode", "==", code)
+            .where("status", "==", "reserved")
+            .get();
+
+          if (snapshot.empty) {
+            setCancelMsg("該当する予約コードが見つかりません。");
+            return;
+          }
+
+          await db.collection(COLLECTION_PATH).doc(snapshot.docs[0].id).delete();
+          setCancelMsg("予約をキャンセルしました。");
+          setCancelCode("");
+        } catch {
+          setCancelMsg("キャンセルに失敗しました。");
+        }
+      }
+
+      return (
+        <div className="min-h-screen bg-slate-100">
+          <header className="bg-gradient-to-r from-emerald-600 to-teal-600 text-white shadow-lg">
+            <div className="max-w-7xl mx-auto px-6 py-8">
+              <div className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
+                <div>
+                  <h1 className="text-3xl md:text-4xl font-black tracking-tight">ピアノプラクティスルーム予約システム</h1>
+                  <p className="mt-3 max-w-3xl text-emerald-50 leading-7">
+                    学生専用ページです。空き状況を確認しながら、当日から2週間先までの練習室を予約できます。
+                    予約完了後に発行される予約コードでキャンセルも可能です。
+                  </p>
+                </div>
+                <div className="text-sm font-bold bg-white/15 rounded-2xl px-4 py-2">
+                  {APP_VERSION}
+                </div>
+              </div>
+            </div>
+          </header>
+
+          <main className="max-w-7xl mx-auto px-6 py-8 space-y-6">
+            <section className="bg-white rounded-3xl border border-slate-200 p-6 shadow-sm">
+              <h2 className="text-xl font-black text-slate-800">予約カレンダー</h2>
+              <p className="text-sm text-slate-500 mt-1">当日から2週間先までの日付を選択できます。</p>
+              <div className="mt-5 grid grid-cols-2 sm:grid-cols-4 md:grid-cols-7 gap-3">
+                {calendarDates.map((d) => {
+                  const selected = d === date;
+                  return (
+                    <button
+                      key={d}
+                      onClick={() => setDate(d)}
+                      className={`rounded-2xl border p-4 text-left transition shadow-sm ${selected ? "bg-emerald-600 text-white border-emerald-600" : "bg-slate-50 hover:bg-emerald-50 border-slate-200 text-slate-700"}`}
+                    >
+                      <div className="text-xs opacity-80">{d}</div>
+                      <div className="mt-1 text-lg font-black">{dayLabel(d)}</div>
+                    </button>
+                  );
+                })}
+              </div>
+            </section>
+
+            <div className="grid xl:grid-cols-[1.1fr,0.9fr] gap-6">
+              <section className="bg-white rounded-3xl border border-slate-200 p-6 shadow-sm">
+                <h2 className="text-xl font-black text-slate-800 mb-4">選択日の空き状況</h2>
+                <div className="overflow-auto rounded-2xl border border-slate-200">
+                  <table className="w-full text-sm">
+                    <thead className="bg-slate-50 text-slate-600">
+                      <tr>
+                        <th className="px-4 py-3 text-left">時間</th>
+                        <th className="px-4 py-3 text-left">空き室数</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {timeSlots.map((t) => (
+                        <tr key={t} className={`border-t border-slate-200 ${t === start ? "bg-emerald-50" : "bg-white"}`}>
+                          <td className="px-4 py-3 font-medium">{fmtTime(t)}</td>
+                          <td className="px-4 py-3">{ROOMS.filter((r) => isFreeAt(date, r, t, 30)).length}室空き</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </section>
+
+              <div className="space-y-6">
+                <section className="bg-white rounded-3xl border border-slate-200 p-6 shadow-sm">
+                  <h2 className="text-xl font-black text-slate-800 mb-4">予約する</h2>
+                  <form onSubmit={reserve} className="space-y-3">
+                    <input
+                      type="date"
+                      min={today()}
+                      max={lastReservableDate()}
+                      value={date}
+                      onChange={(e) => setDate(e.target.value)}
+                      className="w-full rounded-xl border border-slate-300 px-4 py-3"
+                    />
+
+                    <select
+                      value={start}
+                      onChange={(e) => setStart(Number(e.target.value))}
+                      className="w-full rounded-xl border border-slate-300 px-4 py-3 bg-white"
+                    >
+                      {timeSlots.map((t) => <option key={t} value={t}>{fmtTime(t)}</option>)}
+                    </select>
+
+                    <select
+                      value={duration}
+                      onChange={(e) => setDuration(Number(e.target.value))}
+                      className="w-full rounded-xl border border-slate-300 px-4 py-3 bg-white"
+                    >
+                      <option value={30}>30分</option>
+                      <option value={60}>60分</option>
+                      <option value={90}>90分</option>
+                    </select>
+
+                    <select
+                      value={room}
+                      onChange={(e) => setRoom(e.target.value)}
+                      className="w-full rounded-xl border border-slate-300 px-4 py-3 bg-white"
+                    >
+                      <option value="">空き部屋を選択</option>
+                      {freeRooms.map((r) => <option key={r} value={r}>{r}</option>)}
+                    </select>
+
+                    <input
+                      placeholder="学籍番号"
+                      value={form.id}
+                      onChange={(e) => setForm({ ...form, id: e.target.value })}
+                      className="w-full rounded-xl border border-slate-300 px-4 py-3"
+                    />
+                    <input
+                      placeholder="氏名"
+                      value={form.name}
+                      onChange={(e) => setForm({ ...form, name: e.target.value })}
+                      className="w-full rounded-xl border border-slate-300 px-4 py-3"
+                    />
+                    <input
+                      placeholder="連絡先"
+                      value={form.contact}
+                      onChange={(e) => setForm({ ...form, contact: e.target.value })}
+                      className="w-full rounded-xl border border-slate-300 px-4 py-3"
+                    />
+                    <input
+                      placeholder="メール"
+                      value={form.email}
+                      onChange={(e) => setForm({ ...form, email: e.target.value })}
+                      className="w-full rounded-xl border border-slate-300 px-4 py-3"
+                    />
+
+                    <button className="w-full rounded-xl bg-emerald-600 text-white py-3 font-black hover:bg-emerald-700 transition">
+                      予約する
+                    </button>
+
+                    {msg && (
+                      <div className="rounded-xl bg-emerald-50 text-emerald-800 px-4 py-3 text-sm font-medium">
+                        {msg}
+                      </div>
+                    )}
+
+                    {latestCode && (
+                      <div className="rounded-2xl bg-amber-50 border border-amber-200 px-4 py-4">
+                        <div className="text-sm text-amber-800">キャンセル時に必要な予約コード</div>
+                        <div className="mt-2 text-2xl font-black tracking-widest text-amber-900">{latestCode}</div>
+                      </div>
+                    )}
+                  </form>
+                </section>
+
+                <section className="bg-white rounded-3xl border border-slate-200 p-6 shadow-sm">
+                  <h2 className="text-xl font-black text-slate-800 mb-4">予約をキャンセルする</h2>
+                  <form onSubmit={cancelReservation} className="space-y-3">
+                    <input
+                      placeholder="例: PR-AB12CD34"
+                      value={cancelCode}
+                      onChange={(e) => setCancelCode(e.target.value.toUpperCase())}
+                      className="w-full rounded-xl border border-slate-300 px-4 py-3"
+                    />
+                    <button className="w-full rounded-xl bg-rose-600 text-white py-3 font-black hover:bg-rose-700 transition">
+                      予約コードでキャンセル
+                    </button>
+                    {cancelMsg && (
+                      <div className="rounded-xl bg-rose-50 text-rose-700 px-4 py-3 text-sm font-medium">
+                        {cancelMsg}
+                      </div>
+                    )}
+                  </form>
+                </section>
+              </div>
+            </div>
+          </main>
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+  </script>
+</body>
+</html>
